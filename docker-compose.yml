@@ -1,0 +1,48 @@
+version: '3.8'
+
+services:
+  ollama:
+    image: ollama/ollama:latest
+    container_name: mcp-ollama
+    volumes:
+      - ollama_data:/root/.ollama
+    ports:
+      - "11434:11434"
+    environment:
+      - OLLAMA_HOST=0.0.0.0:11434
+    deploy:
+      resources:
+        reservations:
+          devices:
+            - driver: nvidia
+              count: 1
+              capabilities: [gpu]
+    command: serve
+
+  backend:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: mcp-backend
+    ports:
+      - "3000:3000"
+      - "3001:3001"
+    environment:
+      - OLLAMA_BASE_URL=http://ollama:11434
+      - MODEL_NAME=gemma4:e4b
+      - API_PORT=3000
+      - MCP_PORT=3001
+      - NODE_ENV=production
+    depends_on:
+      - ollama
+    volumes:
+      - ./backend/src:/app/backend/src
+    networks:
+      - mcp-network
+
+volumes:
+  ollama_data:
+
+networks:
+  mcp-network:
+    driver: bridge

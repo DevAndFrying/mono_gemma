@@ -1,0 +1,48 @@
+# Multi-stage build for production
+FROM node:20-alpine AS builder
+
+WORKDIR /app
+
+# Copy package files
+COPY package*.json ./
+COPY backend/package*.json ./backend/
+COPY frontend/package*.json ./frontend/
+
+# Install dependencies
+RUN npm install && \
+    cd backend && npm install && \
+    cd ../frontend && npm install
+
+# Copy source code
+COPY backend/src ./backend/src
+COPY backend/tsconfig.json ./backend/
+COPY frontend/src ./frontend/src
+COPY frontend/public ./frontend/public
+COPY frontend/index.html ./frontend/
+COPY frontend/vite.config.js ./frontend/
+
+# Build backend and frontend
+RUN cd frontend && npm run build
+
+# Runtime stage
+FROM node:20-alpine
+
+WORKDIR /app
+
+# Install Ollama (for local development, optional)
+RUN apk add --no-cache curl
+
+# Copy built files
+COPY --from=builder /app/backend ./backend
+COPY --from=builder /app/frontend/dist ./frontend/dist
+COPY --from=builder /app/node_modules ./node_modules
+COPY --from=builder /app/backend/node_modules ./backend/node_modules
+
+COPY backend/.env.example ./backend/.env
+COPY package.json ./
+
+# Expose ports
+EXPOSE 3000 3001
+
+# Start backend (frontend is served from backend)
+CMD ["npm", "start"]

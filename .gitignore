@@ -1,0 +1,45 @@
+# Logs
+logs/
+*.log
+npm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# Dependencies
+node_modules/
+/dist
+/build
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+.env.local
+.env.*.local
+
+# Environment
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+
+# Runtime
+*.pid
+*.seed
+*.pid.lock
+
+# Build output
+backend/dist/
+frontend/dist/
+
+# SQLite
+*.db
+*.db-journal
+
+# OS
+Thumbs.db
+.vscode-test/
