@@ -1,19 +1,41 @@
 import React, { useState, useEffect, useRef } from 'react';
+import * as pdfjsLib from 'pdfjs-dist';
+import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import './Chat.css';
 import Message from './Message';
 import InputArea from './InputArea';
 
-function Chat({ connected }) {
+pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
+
+function Chat({ connected, selectedModel, weaviateInfo }) {
   const [messages, setMessages] = useState([]);
   const [loading, setLoading] = useState(false);
+  const [uploading, setUploading] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
+  const hasShownModelLoadingRef = useRef(false);
+
+  const replaceLastUploadStatus = (message) => {
+    setMessages(prev => {
+      const updated = [...prev];
+      const lastMsg = updated[updated.length - 1];
+      if (lastMsg?.role === 'assistant' && lastMsg.content?.startsWith('Uploading ')) {
+        updated[updated.length - 1] = message;
+        return updated;
+      }
+      return [...updated, message];
+    });
+  };
 
   useEffect(() => {
-    // Establish WebSocket connection to backend, not frontend
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
-    const wsUrl = `${protocol}//localhost:3000`;
+    const wsUrl = import.meta.env.VITE_WS_URL
+      || (
+        window.location.port === '5173'
+          ? `${protocol}//${window.location.hostname}:3002`
+          : `${protocol}//${window.location.host}`
+      );
     
     console.log('🔌 Connecting WebSocket to:', wsUrl);
     console.log('   Frontend URL:', window.location.href);
@@ -51,6 +73,18 @@ function Chat({ connected }) {
               }
               return updated;
             });
+          } else if (data.type === 'model') {
+            setMessages(prev => {
+              const updated = [...prev];
+              const lastMsg = updated[updated.length - 1];
+              if (lastMsg && lastMsg.role === 'assistant') {
+                updated[updated.length - 1] = {
+                  ...lastMsg,
+                  modelNotice: `Using ${data.payload.model} because ${data.payload.requestedModel || 'the requested model'} is not installed.`,
+                };
+              }
+              return updated;
+            });
           } else if (data.type === 'stream') {
             // Clear loading timeout - model already responding
             if (wsRef.current?.loadingTimeout) {
@@ -63,7 +97,7 @@ function Chat({ connected }) {
               if (lastMsg && lastMsg.role === 'assistant') {
                 updated[updated.length - 1] = {
                   ...lastMsg,
-                  content: (lastMsg.content || '') + data.payload.text,
+                  content: `${lastMsg.modelNotice ? `${lastMsg.modelNotice}\n\n` : ''}${(lastMsg.content || '').replace(`${lastMsg.modelNotice || ''}\n\n`, '')}${data.payload.text}`,
                   hasStarted: true,
                   showLoading: false,
                 };
@@ -139,7 +173,7 @@ function Chat({ connected }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
-  const handleSendMessage = async (text) => {
+  const handleSendMessage = async (text, className, useWeaviateContext = true) => {
     if (!text.trim() || !connected || !wsConnected) {
       if (!wsConnected) {
         console.warn('⚠️ WebSocket not connected yet. Try again in a moment.');
@@ -153,13 +187,21 @@ function Chat({ connected }) {
     setMessages(prev => [...prev, userMessage, assistantPlaceholder]);
     setLoading(true);
 
-    // Show loading message after 2 seconds if no response yet
+    // Show the model-loading notice once, after 2 seconds if no response yet.
     const loadingTimeout = setTimeout(() => {
+      if (hasShownModelLoadingRef.current) {
+        return;
+      }
+
       setMessages(prev => {
         const updated = [...prev];
         const lastMsg = updated[updated.length - 1];
         if (lastMsg && lastMsg.role === 'assistant' && !lastMsg.hasStarted) {
-          lastMsg.showLoading = true;
+          hasShownModelLoadingRef.current = true;
+          updated[updated.length - 1] = {
+            ...lastMsg,
+            showLoading: true,
+          };
         }
         return updated;
       });
@@ -175,7 +217,7 @@ function Chat({ connected }) {
       wsRef.current.send(
         JSON.stringify({
           type: 'message',
-          payload: { text },
+          payload: { text, className, model: selectedModel, useWeaviateContext },
         })
       );
     } else {
@@ -191,6 +233,91 @@ function Chat({ connected }) {
         });
         return updated;
       });
+    }
+  };
+
+  const extractPdfText = async (file) => {
+    const data = new Uint8Array(await file.arrayBuffer());
+    const pdf = await pdfjsLib.getDocument({ data }).promise;
+    const pages = [];
+
+    for (let pageNumber = 1; pageNumber <= pdf.numPages; pageNumber += 1) {
+      const page = await pdf.getPage(pageNumber);
+      const textContent = await page.getTextContent();
+      const pageText = textContent.items
+        .map(item => ('str' in item ? item.str : ''))
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (pageText) {
+        pages.push(`Page ${pageNumber}\n${pageText}`);
+      }
+    }
+
+    return pages.join('\n\n');
+  };
+
+  const extractFileText = async (file) => {
+    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    if (isPdf) {
+      return extractPdfText(file);
+    }
+    return file.text();
+  };
+
+  const handleUploadFiles = async (files, className) => {
+    if (!connected || uploading || weaviateInfo?.status !== 'ready') {
+      replaceLastUploadStatus({
+        role: 'error',
+        content: weaviateInfo?.error || 'Weaviate is not ready for uploads.',
+      });
+      return;
+    }
+
+    setUploading(true);
+    setMessages(prev => [
+      ...prev,
+      {
+        role: 'assistant',
+        content: `Uploading ${files.length} file${files.length === 1 ? '' : 's'} to Weaviate...`,
+      },
+    ]);
+
+    try {
+      const payloadFiles = await Promise.all(files.map(async (file) => ({
+        name: file.name,
+        type: file.type || 'text/plain',
+        size: file.size,
+        content: await extractFileText(file),
+      })));
+
+      const response = await fetch('/api/weaviate/upload', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          className,
+          files: payloadFiles,
+        }),
+      });
+
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Upload failed');
+      }
+
+      const uploadedNames = data.uploaded.map(file => file.fileName).join(', ');
+      replaceLastUploadStatus({
+        role: 'assistant',
+        content: `Uploaded ${data.count} file${data.count === 1 ? '' : 's'} to ${data.className}: ${uploadedNames}`,
+      });
+    } catch (error) {
+      replaceLastUploadStatus({
+        role: 'error',
+        content: `Weaviate upload failed: ${error.message}`,
+      });
+    } finally {
+      setUploading(false);
     }
   };
 
@@ -211,8 +338,12 @@ function Chat({ connected }) {
       </div>
       <InputArea
         onSendMessage={handleSendMessage}
-        disabled={!connected || loading || !wsConnected}
+        onUploadFiles={handleUploadFiles}
+        disabled={!connected || loading || !wsConnected || uploading}
+        uploadDisabled={!connected || uploading || weaviateInfo?.status !== 'ready'}
+        uploadStatus={weaviateInfo}
         loading={loading}
+        uploadLoading={uploading}
       />
     </div>
   );

@@ -16,7 +16,13 @@ A fully contained Model Context Protocol (MCP) monolith featuring Ollama integra
   - Ollama integration for easy model management
   - Configurable temperature and parameters
   
-- **💬 MCP Protocol**
+- **�️ Vector Database**
+  - Weaviate vector database integration
+  - Semantic search capabilities
+  - Document storage and retrieval
+  - Text2Vec Transformers for embeddings
+  
+- **�💬 MCP Protocol**
   - Complete MCP implementation
   - RESTful API endpoints
   - WebSocket for real-time chat
@@ -129,10 +135,12 @@ OLLAMA_BASE_URL=http://localhost:11434
 MODEL_NAME=gemma4:e4b
 API_PORT=3000
 MCP_PORT=3001
+WEAVIATE_URL=http://localhost:8080
 NODE_ENV=development
 
 # For Docker Compose, use:
 # OLLAMA_BASE_URL=http://ollama:11434
+# WEAVIATE_URL=http://weaviate:8080
 ```
 
 ### Model Selection
@@ -242,6 +250,83 @@ Content-Type: application/json
 
 { "method": "resources/list", "params": {} }
 ```
+
+**Available Tools:**
+
+- `query_model`: Query the Gemma model
+  ```json
+  {
+    "method": "tools/call",
+    "params": {
+      "name": "query_model",
+      "arguments": {
+        "prompt": "What is AI?",
+        "temperature": 0.7
+      }
+    }
+  }
+  ```
+
+- `weaviate_create_collection`: Create a new Weaviate collection
+  ```json
+  {
+    "method": "tools/call",
+    "params": {
+      "name": "weaviate_create_collection",
+      "arguments": {
+        "className": "Documents",
+        "description": "General document collection",
+        "vectorizer": "text2vec-transformers"
+      }
+    }
+  }
+  ```
+
+- `weaviate_add_document`: Add a document to a collection
+  ```json
+  {
+    "method": "tools/call",
+    "params": {
+      "name": "weaviate_add_document",
+      "arguments": {
+        "className": "Documents",
+        "content": "This is a sample document about AI.",
+        "properties": { "title": "AI Document", "author": "System" }
+      }
+    }
+  }
+  ```
+
+- `weaviate_search`: Search documents semantically
+  ```json
+  {
+    "method": "tools/call",
+    "params": {
+      "name": "weaviate_search",
+      "arguments": {
+        "className": "Documents",
+        "query": "artificial intelligence",
+        "limit": 5
+      }
+    }
+  }
+  ```
+
+- `weaviate_list_collections`: List all collections
+  ```json
+  {
+    "method": "tools/call",
+    "params": {
+      "name": "weaviate_list_collections",
+      "arguments": {}
+    }
+  }
+  ```
+
+**Available Resources:**
+
+- `gemma://model`: Gemma model interface
+- `weaviate://collections`: List of Weaviate collections
 
 ## Development
 

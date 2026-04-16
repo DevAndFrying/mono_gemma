@@ -1,13 +1,16 @@
-import React, { useState } from 'react';
+import React, { useRef, useState } from 'react';
 import './InputArea.css';
 
-function InputArea({ onSendMessage, disabled, loading }) {
+function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, uploadStatus, loading, uploadLoading }) {
   const [input, setInput] = useState('');
+  const [collectionName, setCollectionName] = useState('UploadedFile');
+  const [useWeaviateContext, setUseWeaviateContext] = useState(true);
+  const fileInputRef = useRef(null);
 
   const handleSubmit = (e) => {
     e.preventDefault();
     if (input.trim() && !disabled) {
-      onSendMessage(input);
+      onSendMessage(input, collectionName, useWeaviateContext);
       setInput('');
     }
   };
@@ -19,8 +22,62 @@ function InputArea({ onSendMessage, disabled, loading }) {
     }
   };
 
+  const handleFileChange = (e) => {
+    const files = Array.from(e.target.files || []);
+    if (files.length && !uploadDisabled && !uploadLoading) {
+      onUploadFiles(files, collectionName);
+    }
+    e.target.value = '';
+  };
+
+  const uploadHint = uploadStatus?.status === 'ready'
+    ? `Uploads enabled: ${uploadStatus.url || 'Weaviate is ready'}`
+    : uploadStatus?.error || 'Waiting for Weaviate...';
+
   return (
     <form className="input-area" onSubmit={handleSubmit}>
+      <div className="upload-row">
+        <label className="collection-label" htmlFor="weaviate-collection">
+          Collection
+        </label>
+        <input
+          id="weaviate-collection"
+          className="collection-input"
+          value={collectionName}
+          onChange={(e) => setCollectionName(e.target.value)}
+          disabled={uploadDisabled || uploadLoading}
+          spellCheck="false"
+        />
+        <input
+          ref={fileInputRef}
+          type="file"
+          className="file-input"
+          multiple
+          onChange={handleFileChange}
+          disabled={uploadDisabled || uploadLoading}
+          accept=".pdf,.txt,.md,.csv,.json,.log,.js,.jsx,.ts,.tsx,.py,.html,.css,.xml,.yaml,.yml"
+        />
+        <button
+          type="button"
+          className="upload-button"
+          disabled={uploadDisabled || uploadLoading}
+          onClick={() => fileInputRef.current?.click()}
+          title="Upload PDF or text files to Weaviate"
+        >
+          {uploadLoading ? 'Uploading...' : 'Upload files'}
+        </button>
+        <span className={`upload-hint ${uploadStatus?.status === 'ready' ? 'ready' : 'offline'}`}>
+          {uploadHint}
+        </span>
+        <label className="context-toggle">
+          <input
+            type="checkbox"
+            checked={useWeaviateContext}
+            onChange={(e) => setUseWeaviateContext(e.target.checked)}
+          />
+          Use Weaviate context
+        </label>
+      </div>
       <div className="input-wrapper">
         <textarea
           className="input-field"
@@ -36,7 +93,7 @@ function InputArea({ onSendMessage, disabled, loading }) {
         <button
           type="submit"
           className="send-button"
-          disabled={disabled || !input.trim() || loading}
+          disabled={disabled || !input.trim() || loading || uploadLoading}
           title="Send message (Enter)"
         >
           {loading ? '⏳' : '📤'}

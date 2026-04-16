@@ -25,6 +25,39 @@
 .header-status {
   display: flex;
   align-items: center;
+  gap: 0.5rem;
+}
+
+.model-picker {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.875rem;
+}
+
+.model-picker select {
+  height: 36px;
+  min-width: 180px;
+  max-width: 280px;
+  padding: 0 0.625rem;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  border: 1px solid var(--color-surface-light);
+  border-radius: 0.5rem;
+  font-family: inherit;
+  font-size: 0.875rem;
+}
+
+.model-picker select:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+.model-picker select:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
 }
 
 .status-indicator {

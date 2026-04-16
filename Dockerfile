@@ -17,11 +17,11 @@ RUN npm install && \
 COPY backend/src ./backend/src
 COPY backend/tsconfig.json ./backend/
 COPY frontend/src ./frontend/src
-COPY frontend/public ./frontend/public
 COPY frontend/index.html ./frontend/
 COPY frontend/vite.config.js ./frontend/
 
 # Build backend and frontend
+RUN cd backend && npm run build
 RUN cd frontend && npm run build
 
 # Runtime stage
