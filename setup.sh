@@ -53,12 +53,12 @@ done
 
 # Check if model exists
 echo ""
-echo "🤖 Checking for Gemma 4 e4B model..."
-if curl -s http://localhost:11434/api/tags | grep -q "gemma4:e4b"; then
-    echo "✓ Gemma 4 e4B model found"
+echo "🤖 Checking for Gemma 3 4B model..."
+if curl -s http://localhost:11434/api/tags | grep -q "gemma3:4b"; then
+    echo "✓ Gemma 3 4B model found"
 else
-    echo "⬇️  Pulling Gemma 4 e4B model (this may take 10-30 minutes)..."
-    ollama pull gemma4:e4b
+    echo "⬇️  Pulling Gemma 3 4B model (this may take several minutes)..."
+    ollama pull gemma3:4b
 fi
 
 # Create .env file if doesn't exist

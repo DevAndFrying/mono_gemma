@@ -1,4 +1,4 @@
-import express from 'express';
+import express, { NextFunction, Request, Response } from 'express';
 import cors from 'cors';
 import axios from 'axios';
 import dotenv from 'dotenv';
@@ -13,7 +13,7 @@ const server = createServer(app);
 const wss = new WebSocketServer({ 
   server,
   perMessageDeflate: false,
-  verifyClient: (info, cb) => {
+  verifyClient: (info: any, cb: any) => {
     console.log('🔗 WebSocket connection request from:', info.origin || 'unknown origin');
     cb(true); // Accept all connections
   }
@@ -49,18 +49,33 @@ const weaviateClient = weaviate.client({
 app.use(cors());
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '25mb' }));
 
-let ollamaModelCache = null;
-
-const normalizeWeaviateClassName = (className) => {
-  const trimmed = (className || DEFAULT_WEAVIATE_FILE_CLASS).trim();
-  if (!/^[A-Z][A-Za-z0-9_]*$/.test(trimmed)) {
-    throw new Error('Collection name must start with an uppercase letter and contain only letters, numbers, or underscores.');
-  }
-  return trimmed;
+type UploadedFilePayload = {
+  name: string;
+  path?: string;
+  type?: string;
+  size?: number;
+  content: string;
 };
 
-const isConnectionRefused = (error) => String(error?.message || error).includes('ECONNREFUSED');
-const axiosResponseDetail = (data, fallback) => {
+type WeaviateContextItem = {
+  id?: string;
+  content: string;
+  fileName?: string;
+  filePath?: string;
+  certainty?: number;
+  sourceUrl?: string;
+};
+
+type OllamaModel = {
+  name: string;
+};
+
+let ollamaModelCache: { models: string[]; expiresAt: number } | null = null;
+
+const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
+const errorStack = (error: unknown) => error instanceof Error ? error.stack : undefined;
+const isConnectionRefused = (error: unknown) => errorMessage(error).includes('ECONNREFUSED');
+const axiosResponseDetail = (data: unknown, fallback: string) => {
   if (!data) {
     return fallback;
   }
@@ -71,11 +86,13 @@ const axiosResponseDetail = (data, fallback) => {
     return data.toString('utf8');
   }
   if (typeof data === 'object') {
-    if (typeof data.error === 'string') {
-      return data.error;
+    const maybeError = (data as { error?: unknown }).error;
+    const maybeMessage = (data as { message?: unknown }).message;
+    if (typeof maybeError === 'string') {
+      return maybeError;
     }
-    if (typeof data.message === 'string') {
-      return data.message;
+    if (typeof maybeMessage === 'string') {
+      return maybeMessage;
     }
     try {
       return JSON.stringify(data);
@@ -85,7 +102,7 @@ const axiosResponseDetail = (data, fallback) => {
   }
   return String(data);
 };
-const ollamaErrorMessage = (error) => {
+const ollamaErrorMessage = (error: unknown) => {
   if (axios.isAxiosError(error)) {
     const status = error.response?.status;
     const detail = axiosResponseDetail(error.response?.data, error.message);
@@ -99,18 +116,18 @@ const ollamaErrorMessage = (error) => {
     }
   }
 
-  return error?.message || String(error);
+  return errorMessage(error);
 };
 
-const getInstalledOllamaModels = async () => {
+const getInstalledOllamaModels = async (): Promise<string[]> => {
   if (ollamaModelCache && ollamaModelCache.expiresAt > Date.now()) {
     return ollamaModelCache.models;
   }
 
   const response = await axios.get(`${OLLAMA_BASE_URL}/api/tags`);
   const models = (response.data?.models || [])
-    .map((model) => model.name)
-    .filter((name) => typeof name === 'string' && !!name);
+    .map((model: OllamaModel) => model.name)
+    .filter((name: unknown): name is string => typeof name === 'string' && !!name);
 
   ollamaModelCache = {
     models,
@@ -120,7 +137,7 @@ const getInstalledOllamaModels = async () => {
   return models;
 };
 
-const resolveOllamaModel = async (requestedModel) => {
+const resolveOllamaModel = async (requestedModel?: string) => {
   const requested = requestedModel?.trim();
   const installedModels = await getInstalledOllamaModels();
 
@@ -208,9 +225,9 @@ const fileCollectionProperties = () => [
   },
 ];
 
-const ensureFileCollectionProperties = async (className) => {
+const ensureFileCollectionProperties = async (className: string) => {
   const schema = await weaviateClient.schema.classGetter().withClassName(className).do();
-  const existingProperties = new Set((schema.properties || []).map(property => property.name));
+  const existingProperties = new Set((schema.properties || []).map((property: any) => property.name));
 
   for (const property of fileCollectionProperties()) {
     if (!existingProperties.has(property.name)) {
@@ -222,7 +239,15 @@ const ensureFileCollectionProperties = async (className) => {
   }
 };
 
-const ensureFileCollection = async (className) => {
+const normalizeWeaviateClassName = (className?: string) => {
+  const trimmed = (className || DEFAULT_WEAVIATE_FILE_CLASS).trim();
+  if (!/^[A-Z][A-Za-z0-9_]*$/.test(trimmed)) {
+    throw new Error('Collection name must start with an uppercase letter and contain only letters, numbers, or underscores.');
+  }
+  return trimmed;
+};
+
+const ensureFileCollection = async (className: string) => {
   const exists = await weaviateClient.schema.exists(className);
   if (exists) {
     await ensureFileCollectionProperties(className);
@@ -239,7 +264,7 @@ const ensureFileCollection = async (className) => {
   }).do();
 };
 
-const validateUploadedFiles = (files) => {
+const validateUploadedFiles = (files: UploadedFilePayload[]) => {
   if (!Array.isArray(files) || files.length === 0) {
     throw new Error('At least one file is required.');
   }
@@ -265,7 +290,7 @@ const validateUploadedFiles = (files) => {
   });
 };
 
-const findExistingFileByPath = async (className, filePath) => {
+const findExistingFileByPath = async (className: string, filePath: string) => {
   const result = await weaviateClient.graphql
     .get()
     .withClassName(className)
@@ -281,14 +306,14 @@ const findExistingFileByPath = async (className, filePath) => {
   return result?.data?.Get?.[className]?.[0] || null;
 };
 
-const truncateText = (text, maxLength) => {
+const truncateText = (text: string, maxLength: number) => {
   if (text.length <= maxLength) {
     return text;
   }
   return `${text.slice(0, maxLength - 3)}...`;
 };
 
-const searchWeaviateContext = async (query, className) => {
+const searchWeaviateContext = async (query: string, className: string): Promise<WeaviateContextItem[]> => {
   try {
     const exists = await weaviateClient.schema.exists(className);
     if (!exists) {
@@ -306,8 +331,8 @@ const searchWeaviateContext = async (query, className) => {
 
     const matches = result?.data?.Get?.[className] || [];
     return matches
-      .filter(item => typeof item.content === 'string' && item.content.trim())
-      .map(item => ({
+      .filter((item: any) => typeof item.content === 'string' && item.content.trim())
+      .map((item: any) => ({
         id: item._additional?.id,
         content: item.content.trim(),
         fileName: item.filePath || item.fileName,
@@ -318,12 +343,12 @@ const searchWeaviateContext = async (query, className) => {
           : undefined,
       }));
   } catch (error) {
-    console.warn(`Weaviate context lookup failed; sending prompt without retrieved context: ${error?.message || error}`);
+    console.warn(`Weaviate context lookup failed; sending prompt without retrieved context: ${errorMessage(error)}`);
     return [];
   }
 };
 
-const buildPromptWithWeaviateContext = async (message, className, useWeaviateContext = true) => {
+const buildPromptWithWeaviateContext = async (message: string, className?: string, useWeaviateContext = true) => {
   if (!useWeaviateContext) {
     return {
       prompt: message,
@@ -375,13 +400,13 @@ const buildPromptWithWeaviateContext = async (message, className, useWeaviateCon
 const clients = new Set();
 
 // WebSocket server
-wss.on('connection', (ws, req) => {
+wss.on('connection', (ws: any, req: any) => {
   console.log('✅ WebSocket client connected');
   console.log('   Client address:', req.socket.remoteAddress);
   console.log('   Total clients:', wss.clients.size);
   clients.add(ws);
 
-  ws.on('message', async (message) => {
+  ws.on('message', async (message: any) => {
     try {
       console.log('📨 WebSocket message received, length:', message.length);
       const data = JSON.parse(message);
@@ -459,7 +484,7 @@ wss.on('connection', (ws, req) => {
           let isStreamComplete = false;
           let streamBuffer = '';
 
-          const handleOllamaLine = (line, idx) => {
+          const handleOllamaLine = (line: string, idx: number) => {
             try {
               const json = JSON.parse(line);
               console.log(`   Line ${idx}: done=${json.done}, hasResponse=${!!json.response}, hasThinking=${!!json.thinking}`);
@@ -491,11 +516,11 @@ wss.on('connection', (ws, req) => {
                 console.log('🟡 Stream marked as done');
               }
             } catch (e) {
-              console.error('   ❌ Error parsing JSON line:', e.message, 'Line:', line.substring(0, 50));
+              console.error('   ❌ Error parsing JSON line:', errorMessage(e), 'Line:', line.substring(0, 50));
             }
           };
           
-          response.data.on('data', (chunk) => {
+          response.data.on('data', (chunk: Buffer) => {
             if (isStreamComplete) return;
             
             chunkCount++;
@@ -503,7 +528,7 @@ wss.on('connection', (ws, req) => {
             streamBuffer += chunk.toString();
             const parts = streamBuffer.split('\n');
             streamBuffer = parts.pop() || '';
-            const lines = parts.filter(l => l.trim());
+            const lines = parts.filter((l: string) => l.trim());
             console.log(`   Contains ${lines.length} lines`);
             
             lines.forEach(handleOllamaLine);
@@ -522,7 +547,7 @@ wss.on('connection', (ws, req) => {
             ws.send(completeMsg);
           });
 
-          response.data.on('error', (error) => {
+          response.data.on('error', (error: Error) => {
             console.error('❌ Stream error:', error.message);
             ws.send(JSON.stringify({
               type: 'error',
@@ -531,7 +556,7 @@ wss.on('connection', (ws, req) => {
           });
         } catch (streamError) {
           console.error('❌ Ollama request error:', ollamaErrorMessage(streamError));
-          console.error('   Stack:', streamError.stack);
+          console.error('   Stack:', errorStack(streamError));
           ws.send(JSON.stringify({
             type: 'error',
             payload: { error: `Connection error: ${ollamaErrorMessage(streamError)}` },
@@ -539,10 +564,10 @@ wss.on('connection', (ws, req) => {
         }
       }
     } catch (error) {
-      console.error('Error:', error.message);
+      console.error('Error:', errorMessage(error));
       ws.send(JSON.stringify({
         type: 'error',
-        payload: { error: error.message },
+        payload: { error: errorMessage(error) },
       }));
     }
   });
@@ -552,7 +577,7 @@ wss.on('connection', (ws, req) => {
     clients.delete(ws);
   });
 
-  ws.on('error', (error) => {
+  ws.on('error', (error: Error) => {
     console.error('WebSocket error:', error);
   });
 });
@@ -570,7 +595,7 @@ app.get('/api/weaviate/health', async (req, res) => {
     res.status(503).json({
       status: 'unavailable',
       url: WEAVIATE_URL,
-      error: isConnectionRefused(error) ? weaviateUnavailableMessage() : error.message,
+      error: isConnectionRefused(error) ? weaviateUnavailableMessage() : errorMessage(error),
     });
   }
 });
@@ -599,8 +624,8 @@ app.get('/api/weaviate/source/:className/:id', async (req, res) => {
     res.setHeader('Content-Disposition', `inline; filename="${fileName.replace(/"/g, '')}"`);
     res.send([`Source: ${filePath}`, '', content].join('\n'));
   } catch (error) {
-    console.error('Weaviate source lookup error:', error.message);
-    res.status(404).send(`Source not found: ${error.message}`);
+    console.error('Weaviate source lookup error:', errorMessage(error));
+    res.status(404).send(`Source not found: ${errorMessage(error)}`);
   }
 });
 
@@ -659,8 +684,8 @@ app.get('/api/models', async (req, res) => {
       models,
     });
   } catch (error) {
-    console.error('Error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('Error:', errorMessage(error));
+    res.status(500).json({ error: errorMessage(error) });
   }
 });
 
@@ -677,8 +702,8 @@ app.post('/api/pull-model', async (req, res) => {
     res.setHeader('Content-Type', 'application/json');
     response.data.pipe(res);
   } catch (error) {
-    console.error('Error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('Error:', errorMessage(error));
+    res.status(500).json({ error: errorMessage(error) });
   }
 });
 
@@ -732,12 +757,12 @@ app.post('/api/weaviate/upload', async (req, res) => {
       skippedDuplicateCount: skippedDuplicates.length,
     });
   } catch (error) {
-    console.error('Weaviate upload error:', error.message);
+    console.error('Weaviate upload error:', errorMessage(error));
     if (isConnectionRefused(error)) {
       res.status(503).json({ error: weaviateUnavailableMessage() });
       return;
     }
-    res.status(400).json({ error: error.message });
+    res.status(400).json({ error: errorMessage(error) });
   }
 });
 
@@ -871,7 +896,7 @@ app.post('/mcp/request', async (req, res) => {
           await weaviateClient.schema.classCreator().withClass(schema).do();
           res.json({ result: `Collection '${args.className}' created successfully` });
         } catch (error) {
-          res.status(500).json({ error: `Failed to create collection: ${error.message}` });
+          res.status(500).json({ error: `Failed to create collection: ${errorMessage(error)}` });
         }
       } else if (name === 'weaviate_add_document') {
         try {
@@ -886,7 +911,7 @@ app.post('/mcp/request', async (req, res) => {
           const result = await weaviateClient.data.creator().withClassName(args.className).withProperties(obj.properties).do();
           res.json({ result: `Document added with ID: ${result.id}` });
         } catch (error) {
-          res.status(500).json({ error: `Failed to add document: ${error.message}` });
+          res.status(500).json({ error: `Failed to add document: ${errorMessage(error)}` });
         }
       } else if (name === 'weaviate_search') {
         try {
@@ -900,19 +925,19 @@ app.post('/mcp/request', async (req, res) => {
 
           res.json({ result: result.data.Get[args.className] });
         } catch (error) {
-          res.status(500).json({ error: `Failed to search: ${error.message}` });
+          res.status(500).json({ error: `Failed to search: ${errorMessage(error)}` });
         }
       } else if (name === 'weaviate_list_collections') {
         try {
           const schema = await weaviateClient.schema.getter().do();
-          const collections = schema.classes.map(cls => ({
+          const collections = (schema.classes || []).map((cls: any) => ({
             name: cls.class,
             description: cls.description,
             vectorizer: cls.vectorizer,
           }));
           res.json({ result: collections });
         } catch (error) {
-          res.status(500).json({ error: `Failed to list collections: ${error.message}` });
+          res.status(500).json({ error: `Failed to list collections: ${errorMessage(error)}` });
         }
       }
     } else if (method === 'resources/read') {
@@ -920,7 +945,7 @@ app.post('/mcp/request', async (req, res) => {
       if (uri === 'weaviate://collections') {
         try {
           const schema = await weaviateClient.schema.getter().do();
-          const collections = schema.classes.map(cls => ({
+          const collections = (schema.classes || []).map((cls: any) => ({
             name: cls.class,
             description: cls.description,
             vectorizer: cls.vectorizer,
@@ -928,7 +953,7 @@ app.post('/mcp/request', async (req, res) => {
           }));
           res.json({ contents: [{ uri, mimeType: 'application/json', text: JSON.stringify(collections, null, 2) }] });
         } catch (error) {
-          res.status(500).json({ error: `Failed to read collections: ${error.message}` });
+          res.status(500).json({ error: `Failed to read collections: ${errorMessage(error)}` });
         }
       } else {
         res.status(404).json({ error: 'Resource not found' });
@@ -937,13 +962,13 @@ app.post('/mcp/request', async (req, res) => {
       res.status(400).json({ error: 'Unknown method' });
     }
   } catch (error) {
-    console.error('MCP Error:', error.message);
-    res.status(500).json({ error: error.message });
+    console.error('MCP Error:', errorMessage(error));
+    res.status(500).json({ error: errorMessage(error) });
   }
 });
 
 // Error handling middleware
-app.use((err, req, res, next) => {
+app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('Error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
