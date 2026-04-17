@@ -1,317 +1,172 @@
-# 🚀 Quick Start Guide
+# Quick Start
 
-## 1. Initial Setup (First Time Only)
+## 1. Install Dependencies
 
-### Option A: Local Setup (Recommended for Development)
-
-```bash
-# Navigate to project directory
-cd /home/end/mcpCodex
-
-# Run setup script (installs Ollama, pulls Gemma 2 model, installs dependencies)
-./setup.sh
-
-# This will:
-# ✓ Check for Ollama installation
-# ✓ Start Ollama service
-# ✓ Pull Gemma 2 9B model (~5.5GB, takes 10-30 min first time)
-# ✓ Install all npm dependencies
-```
-
-### Option B: Docker Setup (All-in-one)
+From the repo root:
 
 ```bash
-cd /home/end/mcpCodex
-
-# Start with Docker (requires Docker and NVIDIA Docker)
-./docker-start.sh
-
-# This will:
-# ✓ Build Docker image
-# ✓ Start Ollama container
-# ✓ Pull Gemma 4 model
-# ✓ Start backend and frontend
-# ✓ Takes 15-40 minutes on first run
+cd /home/end/mcpCodex/mono_gemma
+npm run install-all
 ```
 
----
+## 2. Choose How Ollama Runs
 
-## 2. Start Development
+Use your existing host Ollama models:
 
-### Local Development
-```bash
-cd /home/end/mcpCodex
-
-# Start everything with live reload
-./dev.sh
-
-# Opens:
-# Frontend: http://localhost:5173
-# Backend:  http://localhost:3000
-# WebSocket: ws://localhost:3000
-```
-
-### Docker Development
-```bash
-cd /home/end/mcpCodex
-
-# In separate terminals:
-# Terminal 1: Backend
-cd backend && npm run dev
-
-# Terminal 2: Frontend
-cd frontend && npm run dev
-```
-
-### Manual Setup (Advanced)
-
-**Terminal 1 - Ollama:**
 ```bash
 ollama serve
-```
-
-**Terminal 2 - Backend:**
-```bash
-cd backend
-npm install
-npm run dev
-```
-
-**Terminal 3 - Frontend:**
-```bash
-cd frontend
-npm install
-npm run dev
-```
-
----
-
-## 3. Verify Installation
-
-### Check Backend
-```bash
-curl http://localhost:3000/api/health
-# Expected response: {"status":"ok","model":"gemma4:e4b"}
-```
-
-### Check Models in Ollama
-```bash
 ollama list
-# Should show: gemma4:e4b
+MCP_OLLAMA_MODE=host ./docker-start.sh
 ```
 
-### Open in Browser
-- **Frontend**: http://localhost:5173
-- **Backend API**: http://localhost:3000/api
+Or use the Docker Ollama container:
 
----
-
-## 4. First Conversation
-
-1. Open http://localhost:5173 in browser
-2. Type a message: "What is the capital of France?"
-3. Hit Enter or click Send button
-4. Watch the response stream in real-time
-
----
-
-## 5. Common Issues & Solutions
-
-### Issue: "Connection refused" at localhost:3000
-**Solution:**
 ```bash
-# Make sure backend is running
-ps aux | grep "node"
-
-# If not running, start it:
-cd backend && npm run dev
+MCP_OLLAMA_MODE=container ./docker-start.sh
 ```
 
-### Issue: "Ollama not found"
-**Solution:**
+The default `./docker-start.sh` auto-detects host Ollama when it is running and has models.
+
+## 3. Start The App
+
+Recommended Docker start:
+
 ```bash
-# Install Ollama from https://ollama.ai
-# Or use Homebrew:
-brew install ollama
-
-# Or Linux:
-curl https://ollama.ai/install.sh | sh
+./docker-start.sh
 ```
 
-### Issue: Model taking too long to load
-**Solution:**
-- Gemma 4 e4B: Normal first load is 10-30 minutes
-- Subsequent loads: 2-5 seconds
-- Responses: 10-30 seconds depending on prompt length
+This builds `frontend/dist` before starting Docker, so `http://localhost:3000` serves the latest frontend changes.
 
-### Issue: Out of Memory (OOM) errors
-**Solution:**
+Force GPU mode:
+
 ```bash
-# For RTX 5080, use gemma4:e4b (recommended)
-# If you have issues, switch to lighter model:
-
-# In backend/.env:
-MODEL_NAME=gemma3:4b
-
-# Restart backend
+MCP_ACCELERATOR=gpu ./docker-start.sh
 ```
 
-### Issue: Frontend shows "Backend not connected"
-**Solution:**
+Force CPU mode:
+
 ```bash
-# Check backend is running on port 3000
-lsof -i :3000
-
-# Check WebSocket connection in browser DevTools
-# Open DevTools → Console, check for errors
+MCP_ACCELERATOR=cpu ./docker-start.sh
 ```
 
----
+Local dev mode:
 
-## 6. Configuration
+```bash
+ollama serve
+npm run dev
+```
 
-### Environment Variables
+## 4. Open The UI
 
-Edit `backend/.env`:
+Docker:
+
+- http://localhost:3000
+
+Local dev:
+
+- http://localhost:5173
+
+## 5. Install A Model
+
+Host Ollama:
+
+```bash
+ollama pull gemma4:26b
+ollama list
+```
+
+Docker Ollama:
+
+```bash
+docker exec -it mcp-ollama ollama pull gemma4:26b
+docker exec -it mcp-ollama ollama list
+```
+
+The model selector lists installed models plus configured suggestions. If you select a model that is not installed, the backend falls back to an installed model and the UI shows the fallback.
+
+## 6. Upload Files For RAG
+
+Use **Upload files** for PDFs and selected text/code files.
+
+Use **Upload repo** to upload a full folder or repository.
+
+Repo uploads:
+
+- Preserve relative paths as `filePath`.
+- Skip `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs, cache folders, binaries, and large files.
+- Skip duplicates already in Weaviate with the same `filePath`.
+- Store documents in the default `UploadedFile` collection.
+
+## 7. Ask Questions
+
+Type a message and press Enter or **Send**.
+
+Controls:
+
+- **Stop** interrupts the current streamed response.
+- **Use Weaviate context** toggles RAG context.
+- **Save chat** saves the current chat in browser storage.
+- **Saved chats** loads a saved chat.
+- **Export MD** exports a Markdown transcript.
+- **Export JSON** exports the full chat state.
+
+RAG answers include source cards. Clicking a source opens the stored Weaviate document text.
+
+## 8. Tune RAG Context
+
+For local dev, edit `backend/.env`.
+
+For Docker, edit the `backend.environment` section in `docker-compose.yml`.
+
+Useful settings:
 
 ```env
-# Ollama connection
-OLLAMA_BASE_URL=http://localhost:11434
-MODEL_NAME=gemma4:e4b
-
-# Server ports
-API_PORT=3000
-MCP_PORT=3001
-
-# Environment
-NODE_ENV=development
+WEAVIATE_CONTEXT_RESULTS=12
+WEAVIATE_CONTEXT_CHARS=30000
 ```
 
-### Model Selection
-
-For RTX 5080:
-- **✅ Recommended**: `gemma4:e4b` - Best balance of performance and quality
-- **Lighter**: `gemma3:4b` (3.3GB, 6-8GB VRAM) - Faster, lower quality
-- **Alternative**: `llama2:7b` (3.8GB, 10GB VRAM - lighter)
-
-Change model:
-```bash
-# Pull new model
-ollama pull gemma3:4b
-
-# Update backend/.env
-MODEL_NAME=gemma3:4b
-
-# Restart backend
-```
-
----
-
-## 7. Project Structure
-
-```
-mcpCodex/
-├── backend/                 # Node.js MCP server
-│   ├── src/
-│   │   └── index.js        # Main server with WebSocket
-│   ├── .env                # Configuration
-│   └── package.json
-├── frontend/               # React + Vite app
-│   ├── src/
-│   │   ├── App.jsx        # Main React component
-│   │   ├── components/    # Chat, Header, Message, Input
-│   │   └── index.css      # Theme styles
-│   └── vite.config.js
-├── setup.sh               # Setup script
-├── dev.sh                 # Development launcher
-├── docker-compose.yml     # Docker orchestration
-├── Dockerfile            # Container image
-└── README.md             # Full documentation
-```
-
----
-
-## 8. Advanced Usage
-
-### Manual API Calls
-
-**Chat via REST:**
-```bash
-curl -X POST http://localhost:3000/api/chat \
-  -H "Content-Type: application/json" \
-  -d '{"message":"What is AI?"}'
-```
-
-**WebSocket Chat (via wscat):**
-```bash
-# Install wscat: npm install -g wscat
-wscat -c ws://localhost:3000
-
-# Send message:
-> {"type":"message","payload":{"text":"Hello"}}
-```
-
-### View Server Logs
-```bash
-# Backend logs
-cd backend && npm run dev
-
-# Frontend dev server output
-cd frontend && npm run dev
-
-# Docker logs
-docker-compose logs -f
-```
-
-### Production Build
-```bash
-# Build both backend and frontend
-npm run build
-
-# Start production server
-cd backend && npm start
-```
-
----
-
-## 9. Troubleshooting Commands
+Then restart:
 
 ```bash
-# Check Ollama service
-ollama list
-ollama pull gemma4:9b
-
-# Check ports
-lsof -i :3000
-lsof -i :3001
-lsof -i :5173
-lsof -i :11434
-
-# Kill processes if needed
-killall node
-killall ollama
-
-# View system resources
-nvidia-smi          # GPU usage
-top                 # System resources
+docker compose down
+./docker-start.sh
 ```
 
----
+## 9. Common Checks
 
-## 10. Next Steps
+Check backend:
 
-- ✅ Application is ready to use
-- 📚 Read full [README.md](README.md) for advanced usage
-- 🔧 Check configuration in `backend/.env`
-- 🚀 Deploy with Docker for production
-- 💡 Customize the frontend in `frontend/src/`
+```bash
+curl http://localhost:3000/api/health
+```
 
----
+Check models:
 
-**Need Help?**
-- Check logs in terminal windows
-- Ensure all services are running (Ollama, Backend, Frontend)
-- Verify model is loaded: `ollama list`
-- Test API: `curl http://localhost:3000/api/health`
+```bash
+curl http://localhost:3000/api/models
+```
 
-**Happy Chatting! 🤖**
+Check host Ollama:
+
+```bash
+curl http://localhost:11434/api/tags
+```
+
+Check Weaviate:
+
+```bash
+curl http://localhost:8080/v1/schema
+```
+
+## 10. Reset Weaviate
+
+Drop all uploaded documents/vectors:
+
+```bash
+docker compose down
+docker volume ls | grep weaviate
+docker volume rm mono_gemma_weaviate_data
+./docker-start.sh
+```
+
+If the volume name differs, use the name printed by `docker volume ls`.

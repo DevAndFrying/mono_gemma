@@ -7,11 +7,11 @@ export default defineConfig({
     port: 5173,
     proxy: {
       '/api': {
-        target: 'http://localhost:3000',
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:3002',
         changeOrigin: true,
       },
       '/mcp': {
-        target: 'http://localhost:3000',
+        target: process.env.VITE_BACKEND_URL || 'http://localhost:3002',
         changeOrigin: true,
       },
     },

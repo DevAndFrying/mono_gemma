@@ -6,6 +6,64 @@
   background-color: var(--color-bg);
 }
 
+.chat-toolbar {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  gap: 0.75rem;
+  padding: 0.75rem 1rem;
+  background-color: var(--color-surface);
+  border-bottom: 1px solid var(--color-surface-light);
+}
+
+.saved-chat-controls,
+.export-chat-controls {
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.saved-chat-select,
+.chat-toolbar button {
+  height: 34px;
+  border-radius: 0.5rem;
+  border: 1px solid var(--color-surface-light);
+  font-family: inherit;
+  font-size: 0.85rem;
+}
+
+.saved-chat-select {
+  min-width: 220px;
+  max-width: 360px;
+  padding: 0 0.625rem;
+  background-color: var(--color-bg);
+  color: var(--color-text);
+}
+
+.chat-toolbar button {
+  padding: 0 0.75rem;
+  background-color: var(--color-surface-light);
+  color: var(--color-text);
+  cursor: pointer;
+}
+
+.chat-toolbar button:hover:not(:disabled) {
+  border-color: var(--color-primary);
+}
+
+.chat-toolbar button:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
+  opacity: 0.7;
+}
+
+.chat-toolbar-status {
+  color: var(--color-accent);
+  font-size: 0.82rem;
+  white-space: nowrap;
+}
+
 .messages-area {
   flex: 1;
   overflow-y: auto;
@@ -54,4 +112,16 @@
 
 .empty-state p {
   font-size: 1rem;
+}
+
+@media (max-width: 720px) {
+  .chat-toolbar {
+    align-items: stretch;
+    flex-direction: column;
+  }
+
+  .saved-chat-select {
+    width: 100%;
+    max-width: none;
+  }
 }
