@@ -9,7 +9,7 @@ function Header({ connected, modelInfo, modelOptions, selectedModel, onModelChan
     <header className="header">
       <div className="header-content">
         <div className="header-title">
-          <h1>🤖 MCP Gemma Chat</h1>
+          <h1>MCP Gemma Chat</h1>
           <p className="model-name">
             Default: {modelInfo?.model || 'Loading...'}
           </p>

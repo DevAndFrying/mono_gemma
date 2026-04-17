@@ -135,16 +135,17 @@ const renderFormattedContent = (text) => {
 
 function Message({ role, content, thinking, showLoading, sources = [] }) {
   const [showThinking, setShowThinking] = useState(false);
+  const avatarText = role === 'user' ? 'You' : role === 'error' ? '!' : 'AI';
 
   return (
     <div className={`message message-${role}`}>
       <div className="message-avatar">
-        {role === 'user' ? '👤' : role === 'error' ? '⚠️' : '🤖'}
+        {avatarText}
       </div>
       <div className="message-content">
         {showLoading && (
           <div className="loading-indicator">
-            <p>⏳ Loading model... (first response takes 1-3 minutes)</p>
+            <p>Loading model... first response can take 1-3 minutes.</p>
           </div>
         )}
         {thinking && (
@@ -154,7 +155,7 @@ function Message({ role, content, thinking, showLoading, sources = [] }) {
               onClick={() => setShowThinking(!showThinking)}
               title={showThinking ? 'Hide thinking' : 'Show thinking'}
             >
-              {showThinking ? '▼' : '▶'} 💭 Thinking ({thinking.length} chars)
+              {showThinking ? 'Hide' : 'Show'} thinking ({thinking.length} chars)
             </button>
             {showThinking && (
               <div className="thinking-content">

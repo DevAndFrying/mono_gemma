@@ -148,6 +148,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const messagesEndRef = useRef(null);
   const hasShownModelLoadingRef = useRef(false);
   const chatStatusTimeoutRef = useRef(null);
+  const reconnectAfterCloseRef = useRef(false);
 
   const replaceLastUploadStatus = (message) => {
     setMessages(prev => {
@@ -164,7 +165,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     });
   };
 
-  useEffect(() => {
+  const connectWebSocket = () => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = import.meta.env.VITE_WS_URL
       || (
@@ -172,21 +173,21 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
           ? `${protocol}//${window.location.hostname}:3002`
           : `${protocol}//${window.location.host}`
       );
-    
-    console.log('🔌 Connecting WebSocket to:', wsUrl);
+
+    console.log('Connecting WebSocket to:', wsUrl);
     console.log('   Frontend URL:', window.location.href);
-    
+
     try {
       wsRef.current = new WebSocket(wsUrl);
 
       wsRef.current.onopen = () => {
-        console.log('✅ WebSocket connected (state: OPEN)');
+        console.log('WebSocket connected (state: OPEN)');
         wsRef.current.isConnected = true;
         setWsConnected(true);
       };
 
       wsRef.current.onmessage = (event) => {
-        console.log('📨 WebSocket message received:', event.data.substring(0, 100));
+        console.log('WebSocket message received:', event.data.substring(0, 100));
         try {
           const data = JSON.parse(event.data);
           
@@ -284,7 +285,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
               if (lastMsg && lastMsg.role === 'assistant') {
                 updated[updated.length - 1] = {
                   ...lastMsg,
-                  content: `❌ Error: ${data.payload.error}`,
+                  content: `Error: ${data.payload.error}`,
                   complete: true,
                   showLoading: false,
                 };
@@ -299,23 +300,33 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       };
 
       wsRef.current.onerror = (error) => {
-        console.error('❌ WebSocket error:', error);
+        console.error('WebSocket error:', error);
         console.error('   State after error:', wsRef.current?.readyState);
       };
 
       wsRef.current.onclose = (event) => {
-        console.log('❌ WebSocket closed (state: CLOSED)');
+        console.log('WebSocket closed (state: CLOSED)');
         console.log('   Code:', event.code, 'Reason:', event.reason);
-        wsRef.current.isConnected = false;
+        if (wsRef.current) {
+          wsRef.current.isConnected = false;
+        }
         setWsConnected(false);
+        if (reconnectAfterCloseRef.current) {
+          reconnectAfterCloseRef.current = false;
+          window.setTimeout(connectWebSocket, 250);
+        }
       };
     } catch (error) {
-      console.error('❌ Failed to create WebSocket:', error);
+      console.error('Failed to create WebSocket:', error);
     }
+  };
+
+  useEffect(() => {
+    connectWebSocket();
 
     return () => {
       if (wsRef.current) {
-        console.log('🧹 Cleaning up WebSocket...');
+        console.log('Cleaning up WebSocket...');
         wsRef.current.close();
       }
     };
@@ -418,7 +429,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const handleSendMessage = async (text, className, useWeaviateContext = true) => {
     if (!text.trim() || !connected || !wsConnected) {
       if (!wsConnected) {
-        console.warn('⚠️ WebSocket not connected yet. Try again in a moment.');
+        console.warn('WebSocket not connected yet. Try again in a moment.');
       }
       return;
     }
@@ -452,7 +463,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
 
     // Send via WebSocket
     if (wsRef.current && wsConnected) {
-      console.log('📤 Sending message via WebSocket:', text.substring(0, 50));
+      console.log('Sending message via WebSocket:', text.substring(0, 50));
       
       // Store timeout so we can clear it when response arrives
       wsRef.current.loadingTimeout = loadingTimeout;
@@ -464,7 +475,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
         })
       );
     } else {
-      console.error('❌ WebSocket not connected (wsConnected:', wsConnected, ')');
+      console.error('WebSocket not connected (wsConnected:', wsConnected, ')');
       clearTimeout(loadingTimeout);
       setLoading(false);
       setMessages(prev => {
@@ -476,6 +487,39 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
         });
         return updated;
       });
+    }
+  };
+
+  const handleStopChat = () => {
+    if (!loading) {
+      return;
+    }
+
+    if (wsRef.current?.loadingTimeout) {
+      clearTimeout(wsRef.current.loadingTimeout);
+    }
+
+    reconnectAfterCloseRef.current = true;
+    setLoading(false);
+    setMessages(prev => {
+      const updated = [...prev];
+      const lastMsg = updated[updated.length - 1];
+      if (lastMsg?.role === 'assistant') {
+        updated[updated.length - 1] = {
+          ...lastMsg,
+          content: lastMsg.content || 'Response stopped.',
+          complete: true,
+          stopped: true,
+          showLoading: false,
+        };
+      }
+      return updated;
+    });
+
+    if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
+      wsRef.current.close(4000, 'Stopped by user');
+    } else {
+      connectWebSocket();
     }
   };
 
@@ -723,7 +767,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       <div className="messages-area">
         {messages.length === 0 && (
           <div className="empty-state">
-            <div className="empty-icon">🤖</div>
+            <div className="empty-icon">AI</div>
             <h2>Welcome to MCP Gemma Chat</h2>
             <p>Start a conversation with the Gemma model</p>
           </div>
@@ -742,6 +786,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       </div>
       <InputArea
         onSendMessage={handleSendMessage}
+        onStopChat={handleStopChat}
         onUploadFiles={handleUploadFiles}
         disabled={!connected || loading || !wsConnected || uploading}
         uploadDisabled={!connected || uploading || weaviateInfo?.status !== 'ready'}

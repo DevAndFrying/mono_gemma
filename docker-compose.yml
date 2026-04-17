@@ -79,6 +79,7 @@ services:
       - weaviate
     volumes:
       - ./backend/src:/app/backend/src
+      - ./frontend/dist:/app/frontend/dist:ro
     networks:
       - mcp-network
 

@@ -1,546 +1,436 @@
-# Comprehensive README for MCP Gemma Monolith
+# MCP Gemma Monolith
 
-# 🤖 MCP Gemma Monolith
+A local chat and RAG app that connects a React frontend, an Express/WebSocket backend, Ollama models, and Weaviate vector search.
 
-A fully contained Model Context Protocol (MCP) monolith featuring Ollama integration and a modern React frontend to interact with the latest Gemma 2 model. Optimized for RTX 5080 GPU (16GB VRAM).
+The app can run against Ollama on your host machine or an Ollama Docker container. It can use an NVIDIA GPU when available and falls back to CPU mode when it is not.
 
 ## Features
 
-- **🚀 Full-Stack Application**
-  - Express.js backend with WebSocket support
-  - React 18 frontend with Vite
-  - Real-time streaming responses
-  
-- **🤖 AI Model**
-  - Gemma 4 e4B (optimized for RTX 5080)
-  - Ollama integration for easy model management
-  - Configurable temperature and parameters
-  
-- **�️ Vector Database**
-  - Weaviate vector database integration
-  - Semantic search capabilities
-  - Document storage and retrieval
-  - Text2Vec Transformers for embeddings
-  
-- **�💬 MCP Protocol**
-  - Complete MCP implementation
-  - RESTful API endpoints
-  - WebSocket for real-time chat
-  - Tool calling interface
-  
-- **🐳 Docker Support**
-  - Full Docker setup with docker-compose
-  - GPU support (NVIDIA CUDA)
-  - Multi-stage builds for efficiency
+- Streaming chat over WebSockets with a Stop button.
+- Ollama model selection with installed-model detection and fallback notices.
+- Host Ollama mode for using models already installed on your system.
+- Docker Ollama mode for isolated container-based model storage.
+- Weaviate-backed file and repository upload for RAG.
+- Repo upload filtering for generated folders, binary files, large files, and duplicate `filePath` values.
+- RAG answers with source metadata and clickable source links.
+- Saved chats in browser storage.
+- Markdown and JSON chat export.
+- MCP-style REST endpoint with model and Weaviate tools.
 
-## System Requirements
+## Requirements
 
-- **GPU**: RTX 5080 (16GB VRAM) or equivalent
-- **CPU**: 6+ cores recommended
-- **RAM**: 16GB+ system memory
-- **Storage**: 20GB+ for model and dependencies
-- **OS**: Linux (recommended), macOS, or Windows with WSL2
-- **Docker**: Optional but recommended
+- Node.js 20+
+- npm
+- Ollama, if using host Ollama or local dev mode
+- Docker and Docker Compose, if using the Docker stack
+- NVIDIA Container Toolkit, if using GPU acceleration in Docker
+
+GPU is optional. CPU mode works, but model and embedding generation will be slower.
 
 ## Quick Start
 
-### Prerequisites
+Install dependencies:
 
-1. **Install Ollama**
-   ```bash
-   # Download from https://ollama.ai
-   # Or install via package manager:
-   
-   # macOS
-   brew install ollama
-   
-   # Linux
-   curl https://ollama.ai/install.sh | sh
-   ```
+```bash
+npm run install-all
+```
 
-2. **Install Node.js**
-   ```bash
-   # NVM is recommended
-   nvm install 20
-   nvm use 20
-   ```
+Start the full Docker stack:
 
-3. **Install Docker (Optional)**
-   ```bash
-   # Follow instructions at https://docs.docker.com/get-docker/
-   ```
+```bash
+./docker-start.sh
+```
 
-### Local Setup (Without Docker)
+The startup script builds `frontend/dist` first, then bind-mounts it into the backend container. This keeps `http://localhost:3000` aligned with the current frontend source.
 
-1. **Clone and setup**
-   ```bash
-   cd /home/end/mcpCodex
-   npm run install-all
-   ```
+Open:
 
-2. **Start Ollama service**
-   ```bash
-   ollama serve
-   ```
+- App: http://localhost:3000
+- Backend API: http://localhost:3000/api
+- Weaviate: http://localhost:8080
 
-3. **In a new terminal, pull Gemma 4 model**
-   ```bash
-   ollama pull gemma4:e4b
-   ```
-   
-   Note: This will take 10-30 minutes depending on your connection.
+For local development without Docker:
 
-4. **In another terminal, start the application**
-   ```bash
-   npm run dev
-   ```
+```bash
+ollama serve
+npm run dev
+```
 
-5. **Access the UI**
-   - Backend: http://localhost:3000
-   - Frontend: http://localhost:5173
-   - WebSocket: ws://localhost:3000
+Open:
 
-### Docker Setup (Recommended)
+- Frontend: http://localhost:5173
+- Backend API: http://localhost:3000/api
 
-1. **Ensure NVIDIA Docker is installed**
-   ```bash
-   docker run --rm --gpus all nvidia/cuda:12.0-runtime-ubuntu22.04 nvidia-smi
-   ```
+## Docker Startup Modes
 
-2. **Build and run with Docker Compose**
-   ```bash
-   ./docker-start.sh
-   ```
-   
-   First run will:
-   - Build the Docker image
-   - Start Ollama service
-   - Pull Gemma 2 model (10-30 minutes)
-   - Start backend and frontend
+Use `docker-start.sh` as the normal entry point:
 
-   `docker-start.sh` checks for an RTX 5080 and Docker's NVIDIA runtime. When both are available, it starts Docker Compose with `docker-compose.gpu.yml`, which gives GPU access to Ollama and enables CUDA for Weaviate's transformer embedding sidecar. If the RTX 5080 or NVIDIA Docker runtime is not detected, it uses the default CPU configuration.
+```bash
+./docker-start.sh
+```
 
-   To override detection:
-   ```bash
-   MCP_ACCELERATOR=gpu ./docker-start.sh
-   MCP_ACCELERATOR=cpu ./docker-start.sh
-   ```
+The script checks for:
 
-   If you already have Ollama models installed on your host, `docker-start.sh` will use host Ollama automatically when `http://localhost:11434/api/tags` is reachable and has models. To override that behavior:
-   ```bash
-   MCP_OLLAMA_MODE=host ./docker-start.sh
-   MCP_OLLAMA_MODE=container ./docker-start.sh
-   ```
-   
-3. **Access the application**
-   - Frontend: http://localhost:3000
-   - Backend API: http://localhost:3000/api
-   - WebSocket: ws://localhost:3000
+- Docker Compose
+- RTX 5080 plus Docker NVIDIA runtime
+- host Ollama at `http://localhost:11434/api/tags`
+
+If host Ollama is running and already has models, the backend uses your host models automatically. Otherwise it uses the Docker Ollama service.
+
+Force GPU mode:
+
+```bash
+MCP_ACCELERATOR=gpu ./docker-start.sh
+```
+
+Force CPU mode:
+
+```bash
+MCP_ACCELERATOR=cpu ./docker-start.sh
+```
+
+Force host Ollama:
+
+```bash
+MCP_OLLAMA_MODE=host ./docker-start.sh
+```
+
+Force Docker Ollama:
+
+```bash
+MCP_OLLAMA_MODE=container ./docker-start.sh
+```
+
+Use both overrides together:
+
+```bash
+MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
+```
+
+## Models
+
+The selected model only affects chat answers. File uploads to Weaviate use Weaviate's embedding sidecar, not the selected Ollama model.
+
+Install a model on host Ollama:
+
+```bash
+ollama pull gemma4:26b
+ollama list
+```
+
+Install a model inside Docker Ollama:
+
+```bash
+docker exec -it mcp-ollama ollama pull gemma4:26b
+docker exec -it mcp-ollama ollama list
+```
+
+Default/suggested models are controlled with:
+
+```env
+MODEL_NAME=gemma3:4b
+SUGGESTED_MODELS=gemma4:e4b,gemma4:26b,gemma4:31b
+```
+
+If you select a model that is not installed, the backend falls back to an installed model and the UI shows what was used.
 
 ## Configuration
 
-### Environment Variables
-
-Create `.env` in the `backend/` directory:
+For local dev, create or edit `backend/.env`:
 
 ```env
-# Backend Configuration
 OLLAMA_BASE_URL=http://localhost:11434
-MODEL_NAME=gemma4:e4b
+MODEL_NAME=gemma3:4b
 API_PORT=3000
 MCP_PORT=3001
 WEAVIATE_URL=http://localhost:8080
+WEAVIATE_ENABLE_PQ=true
+WEAVIATE_PQ_TRAINING_LIMIT=50000
 WEAVIATE_CONTEXT_RESULTS=8
 WEAVIATE_CONTEXT_CHARS=16000
+OLLAMA_MODEL_CACHE_MS=30000
+OLLAMA_KEEP_ALIVE=10m
+SUGGESTED_MODELS=gemma4:e4b,gemma4:26b,gemma4:31b
 NODE_ENV=development
-
-# For Docker Compose, use:
-# OLLAMA_BASE_URL=http://ollama:11434
-# WEAVIATE_URL=http://weaviate:8080
 ```
 
-### Model Selection
+For Docker, the backend environment is in `docker-compose.yml`.
 
-For RTX 5080 (16GB VRAM):
+## Uploads And RAG
 
-| Model | Size | VRAM | Speed | Quality |
-|-------|------|------|-------|---------|
-| **gemma4:e4b** | ~6GB | 10-13GB | ⚡⚡⚡ | ⭐⭐⭐⭐⭐ |
-| gemma3:12b | 8.1GB | 10-13GB | ⚡⚡⚡ | ⭐⭐⭐⭐ |
-| gemma3:4b | 3.3GB | 6-8GB | ⚡⚡⚡⚡ | ⭐⭐⭐ |
+Use **Upload files** for selected PDFs and text/code files.
 
-To use a different model:
+Use **Upload repo** to choose a folder or repository. The frontend preserves repo-relative paths and sends them as `filePath`.
+
+Upload behavior:
+
+- PDFs are parsed in the browser with `pdfjs-dist`.
+- Text/code files are read in the browser.
+- Repo uploads skip common generated folders such as `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs, and cache folders.
+- Repo uploads skip unsupported binary files.
+- Repo uploads skip files larger than 2 MB by default.
+- Backend skips duplicates already in the target Weaviate collection with the same `filePath`.
+- Uploads are batched to avoid oversized JSON requests.
+
+The visible collection selector was removed from the UI. The app uses the default Weaviate class:
+
+```text
+UploadedFile
+```
+
+Stored properties include:
+
+```text
+content
+fileName
+filePath
+mimeType
+size
+uploadedAt
+```
+
+## RAG Context Size
+
+Tune how much Weaviate context is retrieved:
+
+```env
+WEAVIATE_CONTEXT_RESULTS=8
+WEAVIATE_CONTEXT_CHARS=16000
+```
+
+For more information per answer:
+
+```env
+WEAVIATE_CONTEXT_RESULTS=12
+WEAVIATE_CONTEXT_CHARS=30000
+```
+
+Larger values give the model more source material but can slow responses and may reduce focus on smaller models.
+
+RAG answers include source cards under the assistant response. Source links open the copy stored in Weaviate:
+
+```text
+/api/weaviate/source/:className/:id
+```
+
+They do not open arbitrary local filesystem paths directly, because browsers block that for security.
+
+## Chat Features
+
+- **Stop** closes the active WebSocket stream, marks the partial answer complete, and reconnects for the next message.
+- **Save chat** stores the current chat in browser `localStorage`.
+- **Saved chats** loads a previously saved local chat.
+- **Delete saved** removes the selected saved chat.
+- **Export MD** downloads the current chat as Markdown.
+- **Export JSON** downloads the full chat state, including RAG source metadata.
+
+Saved chats are local to the browser/profile. They are not stored in the backend.
+
+## Dropping Or Cleaning Weaviate
+
+Drop the whole Weaviate database by deleting the Docker volume:
+
 ```bash
-# Pull the model
-ollama pull gemma3:12b
-
-# Update .env
-MODEL_NAME=gemma3:12b
+docker compose down
+docker volume ls | grep weaviate
+docker volume rm mono_gemma_weaviate_data
+./docker-start.sh
 ```
 
-### Uploading Files or Repositories to Weaviate
+If your volume name differs, replace `mono_gemma_weaviate_data` with the value from `docker volume ls`.
 
-Use **Upload files** for selected PDFs or text/code files. Use **Upload repo** to pick a folder or repository; the app preserves repo-relative paths in Weaviate as `filePath` and uploads files in batches.
+Delete specific files by object ID:
 
-Repo uploads skip generated or heavy folders such as `.git`, `node_modules`, `dist`, `build`, `coverage`, virtual environments, and common cache directories. They also skip unsupported binary files and files larger than 2 MB by default.
+```bash
+curl -X DELETE http://localhost:8080/v1/objects/UploadedFile/YOUR_OBJECT_ID
+```
 
-Uploads skip files that already exist in the target Weaviate collection with the same `filePath`, so re-uploading a repo only adds new paths.
+Find objects by `filePath`:
 
-RAG answers include clickable source links for retrieved Weaviate documents. Increase `WEAVIATE_CONTEXT_RESULTS` to retrieve more files and `WEAVIATE_CONTEXT_CHARS` to give the model more text from those files.
+```bash
+curl -s http://localhost:8080/v1/graphql \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "query": "{ Get { UploadedFile(where: { path: [\"filePath\"], operator: Like, valueText: \"*cve*\" }) { fileName filePath _additional { id } } } }"
+  }'
+```
+
+## API
+
+Health:
+
+```bash
+curl http://localhost:3000/api/health
+```
+
+List models:
+
+```bash
+curl http://localhost:3000/api/models
+```
+
+One-shot chat:
+
+```bash
+curl -X POST http://localhost:3000/api/chat \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "message": "Summarize the uploaded repo",
+    "className": "UploadedFile",
+    "model": "gemma4:26b",
+    "useWeaviateContext": true
+  }'
+```
+
+Upload files:
+
+```bash
+curl -X POST http://localhost:3000/api/weaviate/upload \
+  -H 'Content-Type: application/json' \
+  -d '{
+    "className": "UploadedFile",
+    "files": [
+      {
+        "name": "notes.txt",
+        "path": "notes.txt",
+        "type": "text/plain",
+        "size": 12,
+        "content": "hello world"
+      }
+    ]
+  }'
+```
+
+Source lookup:
+
+```bash
+curl http://localhost:3000/api/weaviate/source/UploadedFile/YOUR_OBJECT_ID
+```
+
+MCP request endpoint:
+
+```bash
+curl -X POST http://localhost:3000/mcp/request \
+  -H 'Content-Type: application/json' \
+  -d '{ "method": "tools/list", "params": {} }'
+```
+
+Available MCP tools:
+
+- `query_model`
+- `weaviate_create_collection`
+- `weaviate_add_document`
+- `weaviate_search`
+- `weaviate_list_collections`
+
+Available MCP resources:
+
+- `gemma://model`
+- `weaviate://collections`
 
 ## Project Structure
 
-```
-mcp-codex/
+```text
+mono_gemma/
 ├── backend/
 │   ├── src/
-│   │   └── index.js          # Main backend server
+│   │   ├── index.js
+│   │   └── index.ts
+│   ├── .env.example
 │   ├── package.json
-│   ├── tsconfig.json
-│   └── .env.example
+│   └── tsconfig.json
 ├── frontend/
 │   ├── src/
-│   │   ├── components/       # React components
+│   │   ├── components/
 │   │   ├── App.jsx
-│   │   ├── main.jsx
-│   │   └── index.css
-│   ├── index.html
-│   ├── vite.config.js
-│   └── package.json
-├── package.json              # Monorepo root
-├── Dockerfile
+│   │   └── main.jsx
+│   ├── package.json
+│   └── vite.config.js
 ├── docker-compose.yml
+├── docker-compose.gpu.yml
+├── docker-compose.host-ollama.yml
+├── docker-start.sh
+├── dev.sh
+├── setup.sh
+├── Dockerfile
 └── README.md
 ```
 
-## API Documentation
+## Development Commands
 
-### WebSocket Events
-
-**Client → Server**
-```json
-{
-  "type": "message",
-  "payload": { "text": "What is AI?" }
-}
-```
-
-**Server → Client**
-```json
-{
-  "type": "stream",
-  "payload": { "text": "chunk of response" }
-}
-```
-
-```json
-{
-  "type": "complete",
-  "payload": { "text": "full response" }
-}
-```
-
-### REST Endpoints
-
-#### Health Check
-```bash
-GET /api/health
-# Response: { "status": "ok", "model": "gemma4:e4b" }
-```
-
-#### Chat (One-shot)
-```bash
-POST /api/chat
-Content-Type: application/json
-
-{ "message": "What is the capital of France?" }
-```
-
-#### List Models
-```bash
-GET /api/models
-```
-
-#### Pull Model
-```bash
-POST /api/pull-model
-Content-Type: application/json
-
-{ "model": "gemma3:4b" }
-```
-
-#### MCP Protocol
-```bash
-POST /mcp/request
-Content-Type: application/json
-
-{ "method": "resources/list", "params": {} }
-```
-
-**Available Tools:**
-
-- `query_model`: Query the Gemma model
-  ```json
-  {
-    "method": "tools/call",
-    "params": {
-      "name": "query_model",
-      "arguments": {
-        "prompt": "What is AI?",
-        "temperature": 0.7
-      }
-    }
-  }
-  ```
-
-- `weaviate_create_collection`: Create a new Weaviate collection
-  ```json
-  {
-    "method": "tools/call",
-    "params": {
-      "name": "weaviate_create_collection",
-      "arguments": {
-        "className": "Documents",
-        "description": "General document collection",
-        "vectorizer": "text2vec-transformers"
-      }
-    }
-  }
-  ```
-
-- `weaviate_add_document`: Add a document to a collection
-  ```json
-  {
-    "method": "tools/call",
-    "params": {
-      "name": "weaviate_add_document",
-      "arguments": {
-        "className": "Documents",
-        "content": "This is a sample document about AI.",
-        "properties": { "title": "AI Document", "author": "System" }
-      }
-    }
-  }
-  ```
-
-- `weaviate_search`: Search documents semantically
-  ```json
-  {
-    "method": "tools/call",
-    "params": {
-      "name": "weaviate_search",
-      "arguments": {
-        "className": "Documents",
-        "query": "artificial intelligence",
-        "limit": 5
-      }
-    }
-  }
-  ```
-
-- `weaviate_list_collections`: List all collections
-  ```json
-  {
-    "method": "tools/call",
-    "params": {
-      "name": "weaviate_list_collections",
-      "arguments": {}
-    }
-  }
-  ```
-
-**Available Resources:**
-
-- `gemma://model`: Gemma model interface
-- `weaviate://collections`: List of Weaviate collections
-
-## Development
-
-### Backend Development
+Install dependencies:
 
 ```bash
-# Watch mode
-cd backend && npm run dev
-
-# Build TypeScript
-npm run build
-
-# Run built version
-npm start
+npm run install-all
 ```
 
-### Frontend Development
+Start dev servers:
 
 ```bash
-# Vite dev server with hot reload
-cd frontend && npm run dev
-
-# Build for production
-npm run build
-
-# Preview production build
-npm run preview
-```
-
-### Full Stack Development
-
-```bash
-# Start everything at once
 npm run dev
+```
 
-# Runs:
-# - Backend: npm run dev:backend (http://localhost:3000)
-# - Frontend: npm run dev:frontend (http://localhost:5173)
+Build everything:
+
+```bash
+npm run build
+```
+
+Build backend:
+
+```bash
+cd backend && npm run build
+```
+
+Build frontend:
+
+```bash
+cd frontend && npm run build
 ```
 
 ## Troubleshooting
 
-### Ollama Connection Issues
+Check host Ollama:
+
 ```bash
-# Check if Ollama is running
 ollama list
-
-# Verify endpoint
 curl http://localhost:11434/api/tags
-
-# Restart Ollama
-killall ollama
-ollama serve
 ```
 
-### Model Memory Issues
-```bash
-# For RTX 5080, if you get OOM:
-# 1. Use smaller model: gemma3:4b
-# 2. Reduce batch size in backend
-# 3. Limit context length
+Check Docker Ollama:
 
-# Check GPU memory
+```bash
+docker exec -it mcp-ollama ollama list
+```
+
+Check Weaviate:
+
+```bash
+curl http://localhost:8080/v1/schema
+curl http://localhost:3000/api/weaviate/health
+```
+
+Check GPU:
+
+```bash
 nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.0-runtime-ubuntu22.04 nvidia-smi
 ```
 
-### Frontend Not Connecting
-```bash
-# Clear browser cache
-# Check console for WebSocket errors
-# Verify backend is running on port 3000
-# Check browser console: DevTools → Console
-
-# In browser console:
-curl('http://localhost:3000/api/health')
-```
-
-### Docker Issues
-```bash
-# Rebuild containers
-docker-compose down
-docker-compose up --build
-
-# View logs
-docker-compose logs -f
-
-# GPU not detected
-docker run --rm --gpus all nvidia/cuda:12.0-runtime nvidia-smi
-```
-
-## Performance Optimization
-
-### For RTX 5080
-
-1. **GPU Memory**
-   - Gemma 2 9B runs efficiently at 10-12GB
-   - Enable GPU memory optimization in production
-
-2. **Streaming**
-   - WebSocket streaming is enabled for real-time responses
-   - Reduces perceived latency
-
-3. **Model Quantization**
-   - Models are already quantized for efficiency
-   - Consider GGUF format for faster loading
-
-### Production Deployment
+Rebuild/restart Docker:
 
 ```bash
-# Build optimized containers
-npm run build
-
-# Run with production settings
-docker-compose -f docker-compose.yml up -d
-
-# Monitor resources
-watch -n 1 'docker stats'
+docker compose down
+./docker-start.sh
 ```
 
-## Common Commands
+## Notes
 
-```bash
-# Install all dependencies
-npm run install-all
-
-# Start development
-npm run dev
-
-# Build for production
-npm run build
-
-# Docker operations
-npm run docker:build
-npm run docker:run
-
-# Pull different model
-ollama pull gemma3:4b
-```
-
-## Architecture
-
-### Backend
-- **Express.js** with WebSocket support
-- **Ollama** for model hosting
-- **MCP Protocol** implementation
-- Real-time streaming via WebSockets
-- REST API for compatibility
-
-### Frontend
-- **React 18** with hooks
-- **Vite** for fast development
-- **CSS-in-JS** styling
-- Real-time WebSocket communication
-- Responsive design
-
-## Known Limitations
-
-- Gemma 2 27B may cause occasional OOM on RTX 5080
-- Context length limited to prevent memory issues
-- Single-user session (no persistence)
-- No authentication implemented
-
-## Future Enhancements
-
-- [ ] Add chat history persistence
-- [ ] Implement user authentication
-- [ ] Add more model options
-- [ ] Support for custom prompts/templates
-- [ ] Model fine-tuning interface
-- [ ] Multi-user support
-- [ ] Deployment guides (AWS, GCP, Azure)
-
-## Support & Resources
-
-- [Ollama Documentation](https://github.com/ollama/ollama)
-- [Gemma Model Card](https://huggingface.co/google/gemma-1.1-2b)
-- [MCP Specification](https://modelcontextprotocol.io)
-- [React Documentation](https://react.dev)
-- [Vite Documentation](https://vitejs.dev)
+- The selected Ollama model is used for answering questions, not for uploading files.
+- Weaviate vectorization is handled by the `t2v-transformers` sidecar.
+- If you change the Weaviate embedding model, re-index or re-upload documents for consistent vectors.
+- The frontend build may warn about large chunks because `pdfjs-dist` is large. The warning does not block the build.
 
 ## License
 
 MIT
-
-## Contributing
-
-Contributions welcome! Please feel free to submit issues and PRs.
-
----
-
-**Built with ❤️ for AI enthusiasts using RTX 5080**

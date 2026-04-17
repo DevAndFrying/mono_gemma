@@ -82,6 +82,15 @@ else
 fi
 
 echo ""
+echo "Building frontend assets for http://localhost:3000..."
+if ! command -v npm > /dev/null 2>&1; then
+    echo "npm not found. Install Node.js/npm or run Docker without the frontend bind mount."
+    exit 1
+fi
+
+npm run build:frontend
+
+echo ""
 echo "🚀 Starting Docker containers..."
 echo ""
 

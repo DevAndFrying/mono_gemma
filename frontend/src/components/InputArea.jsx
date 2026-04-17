@@ -1,12 +1,12 @@
 import React, { useRef, useState } from 'react';
 import './InputArea.css';
 
-function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, uploadStatus, loading, uploadLoading }) {
+function InputArea({ onSendMessage, onStopChat, onUploadFiles, disabled, uploadDisabled, uploadStatus, loading, uploadLoading }) {
   const [input, setInput] = useState('');
-  const [collectionName, setCollectionName] = useState('UploadedFile');
   const [useWeaviateContext, setUseWeaviateContext] = useState(true);
   const fileInputRef = useRef(null);
   const repoInputRef = useRef(null);
+  const collectionName = 'UploadedFile';
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -38,17 +38,6 @@ function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, upl
   return (
     <form className="input-area" onSubmit={handleSubmit}>
       <div className="upload-row">
-        <label className="collection-label" htmlFor="weaviate-collection">
-          Collection
-        </label>
-        <input
-          id="weaviate-collection"
-          className="collection-input"
-          value={collectionName}
-          onChange={(e) => setCollectionName(e.target.value)}
-          disabled={uploadDisabled || uploadLoading}
-          spellCheck="false"
-        />
         <input
           ref={fileInputRef}
           type="file"
@@ -116,8 +105,19 @@ function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, upl
           disabled={disabled || !input.trim() || loading || uploadLoading}
           title="Send message (Enter)"
         >
-          {loading ? '⏳' : '📤'}
+          Send
         </button>
+        {loading && (
+          <button
+            type="button"
+            className="stop-button"
+            onClick={onStopChat}
+            disabled={uploadLoading}
+            title="Stop current response"
+          >
+            Stop
+          </button>
+        )}
       </div>
     </form>
   );
