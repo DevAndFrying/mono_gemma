@@ -27,12 +27,16 @@ const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
 const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'UploadedFile';
 const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 2 * 1024 * 1024);
-const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 4);
-const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 6000);
+const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 8);
+const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 16000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
 const WEAVIATE_PQ_TRAINING_LIMIT = Number(process.env.WEAVIATE_PQ_TRAINING_LIMIT || 50000);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
+const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma3:4b,gemma3:12b,gemma3:27b')
+  .split(',')
+  .map((model) => model.trim())
+  .filter(Boolean);
 const weaviateUrl = new URL(WEAVIATE_URL);
 
 // Initialize Weaviate client
@@ -47,15 +51,19 @@ app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '25mb' }));
 
 type UploadedFilePayload = {
   name: string;
+  path?: string;
   type?: string;
   size?: number;
   content: string;
 };
 
 type WeaviateContextItem = {
+  id?: string;
   content: string;
   fileName?: string;
+  filePath?: string;
   certainty?: number;
+  sourceUrl?: string;
 };
 
 type OllamaModel = {
@@ -184,6 +192,53 @@ const weaviateVectorIndexConfig = () => ({
     : {}),
 });
 
+const fileCollectionProperties = () => [
+  {
+    name: 'content',
+    dataType: ['text'],
+    description: 'Text content extracted from the uploaded file',
+  },
+  {
+    name: 'fileName',
+    dataType: ['text'],
+    description: 'Original uploaded file name',
+  },
+  {
+    name: 'filePath',
+    dataType: ['text'],
+    description: 'Relative file path for folder or repository uploads',
+  },
+  {
+    name: 'mimeType',
+    dataType: ['text'],
+    description: 'Uploaded file MIME type',
+  },
+  {
+    name: 'size',
+    dataType: ['int'],
+    description: 'Uploaded file size in bytes',
+  },
+  {
+    name: 'uploadedAt',
+    dataType: ['date'],
+    description: 'Upload timestamp',
+  },
+];
+
+const ensureFileCollectionProperties = async (className: string) => {
+  const schema = await weaviateClient.schema.classGetter().withClassName(className).do();
+  const existingProperties = new Set((schema.properties || []).map((property: any) => property.name));
+
+  for (const property of fileCollectionProperties()) {
+    if (!existingProperties.has(property.name)) {
+      await weaviateClient.schema.propertyCreator()
+        .withClassName(className)
+        .withProperty(property)
+        .do();
+    }
+  }
+};
+
 const normalizeWeaviateClassName = (className?: string) => {
   const trimmed = (className || DEFAULT_WEAVIATE_FILE_CLASS).trim();
   if (!/^[A-Z][A-Za-z0-9_]*$/.test(trimmed)) {
@@ -195,6 +250,7 @@ const normalizeWeaviateClassName = (className?: string) => {
 const ensureFileCollection = async (className: string) => {
   const exists = await weaviateClient.schema.exists(className);
   if (exists) {
+    await ensureFileCollectionProperties(className);
     return;
   }
 
@@ -204,33 +260,7 @@ const ensureFileCollection = async (className: string) => {
     vectorizer: 'text2vec-transformers',
     vectorIndexType: 'hnsw',
     vectorIndexConfig: weaviateVectorIndexConfig(),
-    properties: [
-      {
-        name: 'content',
-        dataType: ['text'],
-        description: 'Text content extracted from the uploaded file',
-      },
-      {
-        name: 'fileName',
-        dataType: ['text'],
-        description: 'Original uploaded file name',
-      },
-      {
-        name: 'mimeType',
-        dataType: ['text'],
-        description: 'Uploaded file MIME type',
-      },
-      {
-        name: 'size',
-        dataType: ['int'],
-        description: 'Uploaded file size in bytes',
-      },
-      {
-        name: 'uploadedAt',
-        dataType: ['date'],
-        description: 'Upload timestamp',
-      },
-    ],
+    properties: fileCollectionProperties(),
   }).do();
 };
 
@@ -252,11 +282,28 @@ const validateUploadedFiles = (files: UploadedFilePayload[]) => {
 
     return {
       name: file.name.trim(),
+      path: typeof file.path === 'string' && file.path.trim() ? file.path.trim() : file.name.trim(),
       type: file.type || 'text/plain',
       size: typeof file.size === 'number' ? file.size : Buffer.byteLength(file.content, 'utf8'),
       content: file.content,
     };
   });
+};
+
+const findExistingFileByPath = async (className: string, filePath: string) => {
+  const result = await weaviateClient.graphql
+    .get()
+    .withClassName(className)
+    .withFields('fileName filePath _additional { id }')
+    .withWhere({
+      path: ['filePath'],
+      operator: 'Equal',
+      valueText: filePath,
+    })
+    .withLimit(1)
+    .do();
+
+  return result?.data?.Get?.[className]?.[0] || null;
 };
 
 const truncateText = (text: string, maxLength: number) => {
@@ -277,7 +324,7 @@ const searchWeaviateContext = async (query: string, className: string): Promise<
     const result = await weaviateClient.graphql
       .get()
       .withClassName(className)
-      .withFields('content fileName _additional { certainty }')
+      .withFields('content fileName filePath _additional { id certainty }')
       .withNearText({ concepts: [query] })
       .withLimit(WEAVIATE_CONTEXT_RESULTS)
       .do();
@@ -286,9 +333,14 @@ const searchWeaviateContext = async (query: string, className: string): Promise<
     return matches
       .filter((item: any) => typeof item.content === 'string' && item.content.trim())
       .map((item: any) => ({
+        id: item._additional?.id,
         content: item.content.trim(),
-        fileName: item.fileName,
+        fileName: item.filePath || item.fileName,
+        filePath: item.filePath,
         certainty: item._additional?.certainty,
+        sourceUrl: item._additional?.id
+          ? `/api/weaviate/source/${encodeURIComponent(className)}/${encodeURIComponent(item._additional.id)}`
+          : undefined,
       }));
   } catch (error) {
     console.warn(`Weaviate context lookup failed; sending prompt without retrieved context: ${errorMessage(error)}`);
@@ -302,6 +354,7 @@ const buildPromptWithWeaviateContext = async (message: string, className?: strin
       prompt: message,
       className: className || DEFAULT_WEAVIATE_FILE_CLASS,
       contextCount: 0,
+      contextItems: [],
     };
   }
 
@@ -313,6 +366,7 @@ const buildPromptWithWeaviateContext = async (message: string, className?: strin
       prompt: message,
       className: normalizedClassName,
       contextCount: 0,
+      contextItems: [],
     };
   }
 
@@ -320,12 +374,15 @@ const buildPromptWithWeaviateContext = async (message: string, className?: strin
   const contextBlock = contextItems.map((item, index) => {
     const source = item.fileName ? `Source: ${item.fileName}` : `Source ${index + 1}`;
     const score = typeof item.certainty === 'number' ? `, certainty ${item.certainty.toFixed(3)}` : '';
-    return `[${index + 1}] ${source}${score}\n${truncateText(item.content, charsPerItem)}`;
+    const link = item.sourceUrl ? `\nLink: ${item.sourceUrl}` : '';
+    return `[${index + 1}] ${source}${score}${link}\n${truncateText(item.content, charsPerItem)}`;
   }).join('\n\n');
 
   return {
     prompt: [
-      'Answer the user using the Weaviate context below when it is relevant. If it is not relevant, answer from the user request alone.',
+      'Answer the user using the Weaviate context below when it is relevant. Be specific and include enough detail to be useful.',
+      'When you use retrieved context, cite sources inline like [1] and include a short "Sources" section at the end with the source file names.',
+      'If the context is sparse or only partially answers the question, say what is missing and answer from the available context plus the user request.',
       '',
       'Weaviate context:',
       contextBlock,
@@ -335,6 +392,7 @@ const buildPromptWithWeaviateContext = async (message: string, className?: strin
     ].join('\n'),
     className: normalizedClassName,
     contextCount: contextItems.length,
+    contextItems,
   };
 };
 
@@ -365,6 +423,7 @@ wss.on('connection', (ws: any, req: any) => {
             prompt,
             className: contextClassName,
             contextCount,
+            contextItems,
           } = await buildPromptWithWeaviateContext(text, className, useWeaviateContext);
 
           // Stream response from Ollama with timeout
@@ -400,6 +459,23 @@ wss.on('connection', (ws: any, req: any) => {
                 model: resolvedModel.model,
                 requestedModel: resolvedModel.requestedModel,
                 fallback: true,
+              },
+            }));
+          }
+          if (contextItems.length > 0) {
+            ws.send(JSON.stringify({
+              type: 'context',
+              payload: {
+                className: contextClassName,
+                count: contextCount,
+                sources: contextItems.map((item, index) => ({
+                  index: index + 1,
+                  id: item.id,
+                  fileName: item.fileName,
+                  filePath: item.filePath || item.fileName,
+                  certainty: item.certainty,
+                  sourceUrl: item.sourceUrl,
+                })),
               },
             }));
           }
@@ -524,6 +600,35 @@ app.get('/api/weaviate/health', async (req, res) => {
   }
 });
 
+app.get('/api/weaviate/source/:className/:id', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.params.className);
+    const id = req.params.id;
+    if (!/^[A-Za-z0-9-]+$/.test(id)) {
+      res.status(400).send('Invalid source id.');
+      return;
+    }
+
+    const source = await weaviateClient.data
+      .getterById()
+      .withClassName(className)
+      .withId(id)
+      .do();
+
+    const properties = source?.properties || {};
+    const fileName = typeof properties.fileName === 'string' ? properties.fileName : 'source.txt';
+    const filePath = typeof properties.filePath === 'string' ? properties.filePath : fileName;
+    const content = typeof properties.content === 'string' ? properties.content : '';
+
+    res.setHeader('Content-Type', 'text/plain; charset=utf-8');
+    res.setHeader('Content-Disposition', `inline; filename="${fileName.replace(/"/g, '')}"`);
+    res.send([`Source: ${filePath}`, '', content].join('\n'));
+  } catch (error) {
+    console.error('Weaviate source lookup error:', errorMessage(error));
+    res.status(404).send(`Source not found: ${errorMessage(error)}`);
+  }
+});
+
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, className, model, useWeaviateContext = true } = req.body;
@@ -532,6 +637,7 @@ app.post('/api/chat', async (req, res) => {
       prompt,
       className: contextClassName,
       contextCount,
+      contextItems,
     } = await buildPromptWithWeaviateContext(message, className, useWeaviateContext);
     
     const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
@@ -548,6 +654,14 @@ app.post('/api/chat', async (req, res) => {
       weaviate: {
         className: contextClassName,
         contextCount,
+        sources: contextItems.map((item, index) => ({
+          index: index + 1,
+          id: item.id,
+          fileName: item.fileName,
+          filePath: item.filePath || item.fileName,
+          certainty: item.certainty,
+          sourceUrl: item.sourceUrl,
+        })),
       },
       model: {
         name: resolvedModel.model,
@@ -566,6 +680,7 @@ app.get('/api/models', async (req, res) => {
     const models = await getInstalledOllamaModels();
     res.json({
       defaultModel: MODEL_NAME,
+      suggestedModels: SUGGESTED_MODELS,
       models,
     });
   } catch (error) {
@@ -600,13 +715,26 @@ app.post('/api/weaviate/upload', async (req, res) => {
 
     const uploadedAt = new Date().toISOString();
     const uploaded = [];
+    const skippedDuplicates = [];
 
     for (const file of files) {
+      const existingFile = await findExistingFileByPath(className, file.path);
+      if (existingFile) {
+        skippedDuplicates.push({
+          id: existingFile._additional?.id,
+          fileName: file.name,
+          filePath: file.path,
+          reason: 'already exists',
+        });
+        continue;
+      }
+
       const result = await weaviateClient.data.creator()
         .withClassName(className)
         .withProperties({
           content: file.content,
           fileName: file.name,
+          filePath: file.path,
           mimeType: file.type,
           size: file.size,
           uploadedAt,
@@ -616,6 +744,7 @@ app.post('/api/weaviate/upload', async (req, res) => {
       uploaded.push({
         id: result.id,
         fileName: file.name,
+        filePath: file.path,
         size: file.size,
       });
     }
@@ -624,6 +753,8 @@ app.post('/api/weaviate/upload', async (req, res) => {
       className,
       uploaded,
       count: uploaded.length,
+      skippedDuplicates,
+      skippedDuplicateCount: skippedDuplicates.length,
     });
   } catch (error) {
     console.error('Weaviate upload error:', errorMessage(error));

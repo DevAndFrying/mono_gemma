@@ -8,6 +8,7 @@ function App() {
   const [modelInfo, setModelInfo] = useState(null);
   const [modelOptions, setModelOptions] = useState([]);
   const [selectedModel, setSelectedModel] = useState('');
+  const [installedModels, setInstalledModels] = useState([]);
   const [weaviateInfo, setWeaviateInfo] = useState({ status: 'checking' });
   const wsRef = useRef(null);
 
@@ -41,9 +42,13 @@ function App() {
         const models = Array.isArray(data.models)
           ? data.models.map(model => (typeof model === 'string' ? model : model.name)).filter(Boolean)
           : [];
-        const defaultModel = data.defaultModel || modelInfo?.model || '';
-        const uniqueModels = Array.from(new Set([defaultModel, ...models].filter(Boolean)));
+        const suggestedModels = Array.isArray(data.suggestedModels)
+          ? data.suggestedModels.filter(Boolean)
+          : [];
+        const defaultModel = data.defaultModel || '';
+        const uniqueModels = Array.from(new Set([defaultModel, ...models, ...suggestedModels].filter(Boolean)));
 
+        setInstalledModels(models);
         setModelOptions(uniqueModels);
         setSelectedModel(current => current || defaultModel || uniqueModels[0] || '');
       } catch (error) {
@@ -65,10 +70,16 @@ function App() {
         modelOptions={modelOptions}
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
+        installedModels={installedModels}
         weaviateInfo={weaviateInfo}
       />
       <main className="app-main">
-        <Chat connected={connected} selectedModel={selectedModel} weaviateInfo={weaviateInfo} />
+        <Chat
+          connected={connected}
+          selectedModel={selectedModel}
+          onModelResolved={setSelectedModel}
+          weaviateInfo={weaviateInfo}
+        />
       </main>
     </div>
   );

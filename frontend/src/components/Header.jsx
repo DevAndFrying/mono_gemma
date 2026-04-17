@@ -1,8 +1,9 @@
 import React from 'react';
 import './Header.css';
 
-function Header({ connected, modelInfo, modelOptions, selectedModel, onModelChange, weaviateInfo }) {
+function Header({ connected, modelInfo, modelOptions, selectedModel, onModelChange, installedModels, weaviateInfo }) {
   const weaviateReady = weaviateInfo?.status === 'ready';
+  const installedModelSet = new Set(installedModels || []);
 
   return (
     <header className="header">
@@ -26,11 +27,16 @@ function Header({ connected, modelInfo, modelOptions, selectedModel, onModelChan
             ) : (
               modelOptions.map(model => (
                 <option key={model} value={model}>
-                  {model}
+                  {model}{installedModelSet.has(model) ? '' : ' (not installed)'}
                 </option>
               ))
             )}
           </select>
+          {selectedModel && !installedModelSet.has(selectedModel) && (
+            <span className="model-picker-note">
+              Will use fallback unless pulled
+            </span>
+          )}
         </label>
         <div className="header-status">
           <div className={`status-indicator ${connected ? 'connected' : 'disconnected'}`}>

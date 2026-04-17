@@ -6,6 +6,7 @@ function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, upl
   const [collectionName, setCollectionName] = useState('UploadedFile');
   const [useWeaviateContext, setUseWeaviateContext] = useState(true);
   const fileInputRef = useRef(null);
+  const repoInputRef = useRef(null);
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -22,10 +23,10 @@ function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, upl
     }
   };
 
-  const handleFileChange = (e) => {
+  const handleFileChange = (e, source = 'files') => {
     const files = Array.from(e.target.files || []);
     if (files.length && !uploadDisabled && !uploadLoading) {
-      onUploadFiles(files, collectionName);
+      onUploadFiles(files, collectionName, { source });
     }
     e.target.value = '';
   };
@@ -53,9 +54,19 @@ function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, upl
           type="file"
           className="file-input"
           multiple
-          onChange={handleFileChange}
+          onChange={(e) => handleFileChange(e, 'files')}
           disabled={uploadDisabled || uploadLoading}
           accept=".pdf,.txt,.md,.csv,.json,.log,.js,.jsx,.ts,.tsx,.py,.html,.css,.xml,.yaml,.yml"
+        />
+        <input
+          ref={repoInputRef}
+          type="file"
+          className="file-input"
+          multiple
+          webkitdirectory=""
+          directory=""
+          onChange={(e) => handleFileChange(e, 'repo')}
+          disabled={uploadDisabled || uploadLoading}
         />
         <button
           type="button"
@@ -65,6 +76,15 @@ function InputArea({ onSendMessage, onUploadFiles, disabled, uploadDisabled, upl
           title="Upload PDF or text files to Weaviate"
         >
           {uploadLoading ? 'Uploading...' : 'Upload files'}
+        </button>
+        <button
+          type="button"
+          className="upload-button"
+          disabled={uploadDisabled || uploadLoading}
+          onClick={() => repoInputRef.current?.click()}
+          title="Upload a folder or repository to Weaviate"
+        >
+          Upload repo
         </button>
         <span className={`upload-hint ${uploadStatus?.status === 'ready' ? 'ready' : 'offline'}`}>
           {uploadHint}

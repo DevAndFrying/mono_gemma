@@ -7,20 +7,156 @@ import InputArea from './InputArea';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-function Chat({ connected, selectedModel, weaviateInfo }) {
+const UPLOAD_BATCH_FILE_LIMIT = 25;
+const UPLOAD_BATCH_BYTE_LIMIT = 8 * 1024 * 1024;
+const MAX_REPO_FILE_BYTES = 2 * 1024 * 1024;
+const IGNORED_REPO_DIRECTORIES = new Set([
+  '.cache',
+  '.git',
+  '.next',
+  '.nuxt',
+  '.parcel-cache',
+  '.svelte-kit',
+  '.turbo',
+  '.venv',
+  '.vite',
+  'build',
+  'coverage',
+  'dist',
+  'node_modules',
+  'out',
+  'target',
+  'vendor',
+  'venv',
+  '__pycache__',
+]);
+const TEXT_FILE_EXTENSIONS = new Set([
+  '.c',
+  '.conf',
+  '.cpp',
+  '.cs',
+  '.css',
+  '.csv',
+  '.env',
+  '.go',
+  '.graphql',
+  '.h',
+  '.html',
+  '.java',
+  '.js',
+  '.json',
+  '.jsx',
+  '.log',
+  '.md',
+  '.mdx',
+  '.php',
+  '.prisma',
+  '.py',
+  '.rb',
+  '.rs',
+  '.sh',
+  '.sql',
+  '.svelte',
+  '.toml',
+  '.ts',
+  '.tsx',
+  '.txt',
+  '.vue',
+  '.xml',
+  '.yaml',
+  '.yml',
+]);
+const TEXT_FILE_NAMES = new Set([
+  '.dockerignore',
+  '.env',
+  '.env.example',
+  '.gitignore',
+  'Dockerfile',
+  'Makefile',
+  'README',
+]);
+const SAVED_CHATS_STORAGE_KEY = 'mcp-gemma-saved-chats';
+
+const createChatTitle = (messages) => {
+  const firstUserMessage = messages.find(message => message.role === 'user' && message.content?.trim());
+  if (!firstUserMessage) {
+    return `Chat ${new Date().toLocaleString()}`;
+  }
+  const cleaned = firstUserMessage.content.replace(/\s+/g, ' ').trim();
+  return cleaned.length > 60 ? `${cleaned.slice(0, 57)}...` : cleaned;
+};
+
+const loadSavedChats = () => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(SAVED_CHATS_STORAGE_KEY) || '[]');
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+};
+
+const persistSavedChats = (chats) => {
+  localStorage.setItem(SAVED_CHATS_STORAGE_KEY, JSON.stringify(chats));
+};
+
+const downloadFile = (filename, content, type) => {
+  const blob = new Blob([content], { type });
+  const url = URL.createObjectURL(blob);
+  const link = document.createElement('a');
+  link.href = url;
+  link.download = filename;
+  document.body.appendChild(link);
+  link.click();
+  document.body.removeChild(link);
+  URL.revokeObjectURL(url);
+};
+
+const serializeChatAsMarkdown = (messages) => {
+  const lines = [
+    '# MCP Gemma Chat Export',
+    '',
+    `Exported: ${new Date().toISOString()}`,
+    '',
+  ];
+
+  messages.forEach((message, index) => {
+    lines.push(`## ${index + 1}. ${message.role}`);
+    lines.push('');
+    lines.push(message.content || '');
+    if (message.sources?.length) {
+      lines.push('');
+      lines.push('Sources:');
+      message.sources.forEach((source) => {
+        lines.push(`- [${source.index}] ${source.filePath || source.fileName || 'Source'}${source.sourceUrl ? ` (${source.sourceUrl})` : ''}`);
+      });
+    }
+    lines.push('');
+  });
+
+  return lines.join('\n');
+};
+
+function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const [messages, setMessages] = useState([]);
+  const [savedChats, setSavedChats] = useState(() => loadSavedChats());
+  const [activeSavedChatId, setActiveSavedChatId] = useState('');
+  const [chatStatus, setChatStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef(null);
   const messagesEndRef = useRef(null);
   const hasShownModelLoadingRef = useRef(false);
+  const chatStatusTimeoutRef = useRef(null);
 
   const replaceLastUploadStatus = (message) => {
     setMessages(prev => {
       const updated = [...prev];
       const lastMsg = updated[updated.length - 1];
-      if (lastMsg?.role === 'assistant' && lastMsg.content?.startsWith('Uploading ')) {
+      if (
+        lastMsg?.role === 'assistant'
+        && (lastMsg.content?.startsWith('Uploading ') || lastMsg.content?.startsWith('Preparing '))
+      ) {
         updated[updated.length - 1] = message;
         return updated;
       }
@@ -74,6 +210,9 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
               return updated;
             });
           } else if (data.type === 'model') {
+            if (data.payload?.fallback && data.payload?.model) {
+              onModelResolved?.(data.payload.model);
+            }
             setMessages(prev => {
               const updated = [...prev];
               const lastMsg = updated[updated.length - 1];
@@ -81,6 +220,19 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
                 updated[updated.length - 1] = {
                   ...lastMsg,
                   modelNotice: `Using ${data.payload.model} because ${data.payload.requestedModel || 'the requested model'} is not installed.`,
+                };
+              }
+              return updated;
+            });
+          } else if (data.type === 'context') {
+            setMessages(prev => {
+              const updated = [...prev];
+              const lastMsg = updated[updated.length - 1];
+              if (lastMsg && lastMsg.role === 'assistant') {
+                updated[updated.length - 1] = {
+                  ...lastMsg,
+                  sources: data.payload?.sources || [],
+                  contextClassName: data.payload?.className,
                 };
               }
               return updated;
@@ -173,6 +325,96 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
 
+  const showChatStatus = (status) => {
+    setChatStatus(status);
+    window.clearTimeout(chatStatusTimeoutRef.current);
+    chatStatusTimeoutRef.current = window.setTimeout(() => setChatStatus(''), 3000);
+  };
+
+  const handleSaveChat = () => {
+    if (messages.length === 0) {
+      showChatStatus('No messages to save.');
+      return;
+    }
+
+    const now = new Date().toISOString();
+    const id = activeSavedChatId || `chat-${Date.now()}`;
+    const savedChat = {
+      id,
+      title: createChatTitle(messages),
+      model: selectedModel,
+      updatedAt: now,
+      messages,
+    };
+    const nextChats = [
+      savedChat,
+      ...savedChats.filter(chat => chat.id !== id),
+    ].slice(0, 50);
+
+    persistSavedChats(nextChats);
+    setSavedChats(nextChats);
+    setActiveSavedChatId(id);
+    showChatStatus('Chat saved.');
+  };
+
+  const handleLoadChat = (chatId) => {
+    setActiveSavedChatId(chatId);
+    if (!chatId) {
+      return;
+    }
+    const savedChat = savedChats.find(chat => chat.id === chatId);
+    if (!savedChat) {
+      showChatStatus('Saved chat not found.');
+      return;
+    }
+    setMessages(savedChat.messages || []);
+    if (savedChat.model) {
+      onModelResolved?.(savedChat.model);
+    }
+    showChatStatus('Chat loaded.');
+  };
+
+  const handleNewChat = () => {
+    setMessages([]);
+    setActiveSavedChatId('');
+    showChatStatus('Started a new chat.');
+  };
+
+  const handleDeleteSavedChat = () => {
+    if (!activeSavedChatId) {
+      showChatStatus('Select a saved chat first.');
+      return;
+    }
+    const nextChats = savedChats.filter(chat => chat.id !== activeSavedChatId);
+    persistSavedChats(nextChats);
+    setSavedChats(nextChats);
+    setActiveSavedChatId('');
+    showChatStatus('Saved chat deleted.');
+  };
+
+  const handleExportChat = (format) => {
+    if (messages.length === 0) {
+      showChatStatus('No messages to export.');
+      return;
+    }
+
+    const timestamp = new Date().toISOString().replace(/[:.]/g, '-');
+    if (format === 'json') {
+      downloadFile(
+        `mcp-gemma-chat-${timestamp}.json`,
+        JSON.stringify({ exportedAt: new Date().toISOString(), model: selectedModel, messages }, null, 2),
+        'application/json'
+      );
+    } else {
+      downloadFile(
+        `mcp-gemma-chat-${timestamp}.md`,
+        serializeChatAsMarkdown(messages),
+        'text/markdown'
+      );
+    }
+    showChatStatus(`Exported ${format.toUpperCase()}.`);
+  };
+
   const handleSendMessage = async (text, className, useWeaviateContext = true) => {
     if (!text.trim() || !connected || !wsConnected) {
       if (!wsConnected) {
@@ -185,6 +427,7 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
     const userMessage = { role: 'user', content: text };
     const assistantPlaceholder = { role: 'assistant', content: '', showLoading: false, hasStarted: false };
     setMessages(prev => [...prev, userMessage, assistantPlaceholder]);
+    setActiveSavedChatId('');
     setLoading(true);
 
     // Show the model-loading notice once, after 2 seconds if no response yet.
@@ -266,7 +509,108 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
     return file.text();
   };
 
-  const handleUploadFiles = async (files, className) => {
+  const getFilePath = (file) => file.webkitRelativePath || file.relativePath || file.name;
+
+  const getFileExtension = (fileName) => {
+    const dotIndex = fileName.lastIndexOf('.');
+    return dotIndex >= 0 ? fileName.slice(dotIndex).toLowerCase() : '';
+  };
+
+  const isTextLikeFile = (file) => {
+    const path = getFilePath(file);
+    const fileName = path.split('/').pop() || file.name;
+    return (
+      file.type.startsWith('text/')
+      || file.type === 'application/json'
+      || file.type === 'application/xml'
+      || file.type === 'application/x-yaml'
+      || TEXT_FILE_EXTENSIONS.has(getFileExtension(fileName))
+      || TEXT_FILE_NAMES.has(fileName)
+    );
+  };
+
+  const shouldSkipRepoFile = (file) => {
+    const path = getFilePath(file);
+    const parts = path.split('/').filter(Boolean);
+    const ignoredDirectory = parts.slice(0, -1).find(part => IGNORED_REPO_DIRECTORIES.has(part));
+    if (ignoredDirectory) {
+      return `ignored directory "${ignoredDirectory}"`;
+    }
+    if (file.size > MAX_REPO_FILE_BYTES) {
+      return `larger than ${Math.round(MAX_REPO_FILE_BYTES / 1024 / 1024)} MB`;
+    }
+    if (!isTextLikeFile(file)) {
+      return 'not a supported text/code file';
+    }
+    return '';
+  };
+
+  const prepareUploadFiles = async (files, source) => {
+    const skipped = [];
+    const candidateFiles = source === 'repo'
+      ? files.filter((file) => {
+          const reason = shouldSkipRepoFile(file);
+          if (reason) {
+            skipped.push({ name: getFilePath(file), reason });
+            return false;
+          }
+          return true;
+        })
+      : files;
+
+    const prepared = [];
+    for (const file of candidateFiles) {
+      try {
+        const content = await extractFileText(file);
+        if (!content.trim()) {
+          skipped.push({ name: getFilePath(file), reason: 'no readable text content' });
+          continue;
+        }
+        prepared.push({
+          name: file.name,
+          path: getFilePath(file),
+          type: file.type || 'text/plain',
+          size: file.size,
+          content,
+        });
+      } catch (error) {
+        skipped.push({ name: getFilePath(file), reason: error.message });
+      }
+    }
+
+    return { prepared, skipped };
+  };
+
+  const createUploadBatches = (files) => {
+    const batches = [];
+    let currentBatch = [];
+    let currentBytes = 0;
+
+    files.forEach((file) => {
+      const fileBytes = new TextEncoder().encode(file.content).length;
+      const shouldStartNewBatch = currentBatch.length > 0 && (
+        currentBatch.length >= UPLOAD_BATCH_FILE_LIMIT
+        || currentBytes + fileBytes > UPLOAD_BATCH_BYTE_LIMIT
+      );
+
+      if (shouldStartNewBatch) {
+        batches.push(currentBatch);
+        currentBatch = [];
+        currentBytes = 0;
+      }
+
+      currentBatch.push(file);
+      currentBytes += fileBytes;
+    });
+
+    if (currentBatch.length > 0) {
+      batches.push(currentBatch);
+    }
+
+    return batches;
+  };
+
+  const handleUploadFiles = async (files, className, options = {}) => {
     if (!connected || uploading || weaviateInfo?.status !== 'ready') {
       replaceLastUploadStatus({
         role: 'error',
@@ -275,41 +619,59 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
       return;
     }
 
+    const source = options.source || 'files';
     setUploading(true);
     setMessages(prev => [
       ...prev,
       {
         role: 'assistant',
-        content: `Uploading ${files.length} file${files.length === 1 ? '' : 's'} to Weaviate...`,
+        content: `Preparing ${files.length} ${source === 'repo' ? 'repo file' : 'file'}${files.length === 1 ? '' : 's'} for Weaviate...`,
       },
     ]);
 
     try {
-      const payloadFiles = await Promise.all(files.map(async (file) => ({
-        name: file.name,
-        type: file.type || 'text/plain',
-        size: file.size,
-        content: await extractFileText(file),
-      })));
-
-      const response = await fetch('/api/weaviate/upload', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          className,
-          files: payloadFiles,
-        }),
-      });
-
-      const data = await response.json();
-      if (!response.ok) {
-        throw new Error(data.error || 'Upload failed');
+      const { prepared, skipped } = await prepareUploadFiles(files, source);
+      if (prepared.length === 0) {
+        throw new Error(`No supported files found. Skipped ${skipped.length} file${skipped.length === 1 ? '' : 's'}.`);
       }
 
-      const uploadedNames = data.uploaded.map(file => file.fileName).join(', ');
+      const batches = createUploadBatches(prepared);
+      const uploaded = [];
+      const skippedDuplicates = [];
+      let uploadedClassName = className || 'UploadedFile';
+
+      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
+        const batch = batches[batchIndex];
+        replaceLastUploadStatus({
+          role: 'assistant',
+          content: `Uploading batch ${batchIndex + 1} of ${batches.length} to Weaviate (${uploaded.length}/${prepared.length} files done)...`,
+        });
+
+        const response = await fetch('/api/weaviate/upload', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            className,
+            files: batch,
+          }),
+        });
+
+        const data = await response.json();
+        if (!response.ok) {
+          throw new Error(data.error || 'Upload failed');
+        }
+        uploadedClassName = data.className || uploadedClassName;
+        uploaded.push(...data.uploaded);
+        skippedDuplicates.push(...(data.skippedDuplicates || []));
+      }
+
+      const uploadedNames = uploaded.slice(0, 8).map(file => file.filePath || file.fileName).join(', ');
+      const moreUploaded = uploaded.length > 8 ? `, and ${uploaded.length - 8} more` : '';
+      const skippedText = skipped.length ? ` Skipped ${skipped.length} unsupported/generated file${skipped.length === 1 ? '' : 's'}.` : '';
+      const duplicateText = skippedDuplicates.length ? ` Skipped ${skippedDuplicates.length} duplicate file${skippedDuplicates.length === 1 ? '' : 's'} already in Weaviate.` : '';
       replaceLastUploadStatus({
         role: 'assistant',
-        content: `Uploaded ${data.count} file${data.count === 1 ? '' : 's'} to ${data.className}: ${uploadedNames}`,
+        content: `Uploaded ${uploaded.length} file${uploaded.length === 1 ? '' : 's'} to ${uploadedClassName}${uploaded.length ? `: ${uploadedNames}${moreUploaded}` : ''}.${duplicateText}${skippedText}`,
       });
     } catch (error) {
       replaceLastUploadStatus({
@@ -323,6 +685,41 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
 
   return (
     <div className="chat-container">
+      <div className="chat-toolbar">
+        <div className="saved-chat-controls">
+          <select
+            className="saved-chat-select"
+            value={activeSavedChatId}
+            onChange={(event) => handleLoadChat(event.target.value)}
+            title="Load saved chat"
+          >
+            <option value="">Saved chats</option>
+            {savedChats.map(chat => (
+              <option key={chat.id} value={chat.id}>
+                {chat.title}
+              </option>
+            ))}
+          </select>
+          <button type="button" onClick={handleSaveChat} disabled={messages.length === 0}>
+            Save chat
+          </button>
+          <button type="button" onClick={handleNewChat} disabled={messages.length === 0 && !activeSavedChatId}>
+            New chat
+          </button>
+          <button type="button" onClick={handleDeleteSavedChat} disabled={!activeSavedChatId}>
+            Delete saved
+          </button>
+        </div>
+        <div className="export-chat-controls">
+          <button type="button" onClick={() => handleExportChat('markdown')} disabled={messages.length === 0}>
+            Export MD
+          </button>
+          <button type="button" onClick={() => handleExportChat('json')} disabled={messages.length === 0}>
+            Export JSON
+          </button>
+          {chatStatus && <span className="chat-toolbar-status">{chatStatus}</span>}
+        </div>
+      </div>
       <div className="messages-area">
         {messages.length === 0 && (
           <div className="empty-state">
@@ -332,7 +729,14 @@ function Chat({ connected, selectedModel, weaviateInfo }) {
           </div>
         )}
         {messages.map((msg, idx) => (
-          <Message key={idx} role={msg.role} content={msg.content} thinking={msg.thinking} showLoading={msg.showLoading} />
+          <Message
+            key={idx}
+            role={msg.role}
+            content={msg.content}
+            thinking={msg.thinking}
+            showLoading={msg.showLoading}
+            sources={msg.sources}
+          />
         ))}
         <div ref={messagesEndRef} />
       </div>

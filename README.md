@@ -109,7 +109,7 @@ A fully contained Model Context Protocol (MCP) monolith featuring Ollama integra
 
 2. **Build and run with Docker Compose**
    ```bash
-   docker-compose up --build
+   ./docker-start.sh
    ```
    
    First run will:
@@ -117,6 +117,20 @@ A fully contained Model Context Protocol (MCP) monolith featuring Ollama integra
    - Start Ollama service
    - Pull Gemma 2 model (10-30 minutes)
    - Start backend and frontend
+
+   `docker-start.sh` checks for an RTX 5080 and Docker's NVIDIA runtime. When both are available, it starts Docker Compose with `docker-compose.gpu.yml`, which gives GPU access to Ollama and enables CUDA for Weaviate's transformer embedding sidecar. If the RTX 5080 or NVIDIA Docker runtime is not detected, it uses the default CPU configuration.
+
+   To override detection:
+   ```bash
+   MCP_ACCELERATOR=gpu ./docker-start.sh
+   MCP_ACCELERATOR=cpu ./docker-start.sh
+   ```
+
+   If you already have Ollama models installed on your host, `docker-start.sh` will use host Ollama automatically when `http://localhost:11434/api/tags` is reachable and has models. To override that behavior:
+   ```bash
+   MCP_OLLAMA_MODE=host ./docker-start.sh
+   MCP_OLLAMA_MODE=container ./docker-start.sh
+   ```
    
 3. **Access the application**
    - Frontend: http://localhost:3000
@@ -136,6 +150,8 @@ MODEL_NAME=gemma4:e4b
 API_PORT=3000
 MCP_PORT=3001
 WEAVIATE_URL=http://localhost:8080
+WEAVIATE_CONTEXT_RESULTS=8
+WEAVIATE_CONTEXT_CHARS=16000
 NODE_ENV=development
 
 # For Docker Compose, use:
@@ -161,6 +177,16 @@ ollama pull gemma3:12b
 # Update .env
 MODEL_NAME=gemma3:12b
 ```
+
+### Uploading Files or Repositories to Weaviate
+
+Use **Upload files** for selected PDFs or text/code files. Use **Upload repo** to pick a folder or repository; the app preserves repo-relative paths in Weaviate as `filePath` and uploads files in batches.
+
+Repo uploads skip generated or heavy folders such as `.git`, `node_modules`, `dist`, `build`, `coverage`, virtual environments, and common cache directories. They also skip unsupported binary files and files larger than 2 MB by default.
+
+Uploads skip files that already exist in the target Weaviate collection with the same `filePath`, so re-uploading a repo only adds new paths.
+
+RAG answers include clickable source links for retrieved Weaviate documents. Increase `WEAVIATE_CONTEXT_RESULTS` to retrieve more files and `WEAVIATE_CONTEXT_CHARS` to give the model more text from those files.
 
 ## Project Structure
 
