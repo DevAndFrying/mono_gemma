@@ -7,6 +7,43 @@ function InputArea({ onSendMessage, onStopChat, onUploadFiles, disabled, uploadD
   const fileInputRef = useRef(null);
   const repoInputRef = useRef(null);
   const collectionName = 'UploadedFile';
+  const supportedUploadAccept = [
+    '.pdf',
+    '.c',
+    '.conf',
+    '.cpp',
+    '.cs',
+    '.css',
+    '.csv',
+    '.env',
+    '.go',
+    '.graphql',
+    '.h',
+    '.html',
+    '.java',
+    '.js',
+    '.json',
+    '.jsx',
+    '.log',
+    '.md',
+    '.mdx',
+    '.php',
+    '.prisma',
+    '.py',
+    '.rb',
+    '.rs',
+    '.sh',
+    '.sql',
+    '.svelte',
+    '.toml',
+    '.ts',
+    '.tsx',
+    '.txt',
+    '.vue',
+    '.xml',
+    '.yaml',
+    '.yml',
+  ].join(',');
 
   const handleSubmit = (e) => {
     e.preventDefault();
@@ -45,7 +82,7 @@ function InputArea({ onSendMessage, onStopChat, onUploadFiles, disabled, uploadD
           multiple
           onChange={(e) => handleFileChange(e, 'files')}
           disabled={uploadDisabled || uploadLoading}
-          accept=".pdf,.txt,.md,.csv,.json,.log,.js,.jsx,.ts,.tsx,.py,.html,.css,.xml,.yaml,.yml"
+          accept={supportedUploadAccept}
         />
         <input
           ref={repoInputRef}
@@ -62,7 +99,7 @@ function InputArea({ onSendMessage, onStopChat, onUploadFiles, disabled, uploadD
           className="upload-button"
           disabled={uploadDisabled || uploadLoading}
           onClick={() => fileInputRef.current?.click()}
-          title="Upload PDF or text files to Weaviate"
+          title="Upload PDF, text, or code files to Weaviate"
         >
           {uploadLoading ? 'Uploading...' : 'Upload files'}
         </button>

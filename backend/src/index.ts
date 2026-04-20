@@ -26,7 +26,7 @@ const API_PORT = process.env.API_PORT || 3000;
 const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
 const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'UploadedFile';
-const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 2 * 1024 * 1024);
+const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 20 * 1024 * 1024);
 const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 8);
 const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 16000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
@@ -972,6 +972,22 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('Error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
+
+const handleServerListenError = (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`❌ Backend failed to start: port ${API_PORT} is already in use.`);
+    console.error('   Stop the process using that port or set API_PORT to a free port and update VITE_BACKEND_URL/VITE_WS_URL.');
+  } else if (error.code === 'EACCES' || error.code === 'EPERM') {
+    console.error(`❌ Backend failed to start: permission denied while binding to port ${API_PORT}.`);
+    console.error('   Use an allowed port or update API_PORT in backend/.env.');
+  } else {
+    console.error('❌ Backend failed to start:', error);
+  }
+  process.exit(1);
+};
+
+server.on('error', handleServerListenError);
+wss.on('error', handleServerListenError);
 
 // Start server
 server.listen(API_PORT, () => {

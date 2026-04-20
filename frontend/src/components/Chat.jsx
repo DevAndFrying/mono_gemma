@@ -9,7 +9,8 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const UPLOAD_BATCH_FILE_LIMIT = 25;
 const UPLOAD_BATCH_BYTE_LIMIT = 8 * 1024 * 1024;
-const MAX_REPO_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_REPO_FILE_BYTES = 20 * 1024 * 1024;
+const PDF_FILE_EXTENSIONS = new Set(['.pdf']);
 const IGNORED_REPO_DIRECTORIES = new Set([
   '.cache',
   '.git',
@@ -545,8 +546,14 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     return pages.join('\n\n');
   };
 
+  const isPdfFile = (file) => {
+    const path = getFilePath(file);
+    const fileName = path.split('/').pop() || file.name;
+    return file.type === 'application/pdf' || PDF_FILE_EXTENSIONS.has(getFileExtension(fileName));
+  };
+
   const extractFileText = async (file) => {
-    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    const isPdf = isPdfFile(file);
     if (isPdf) {
       return extractPdfText(file);
     }
@@ -573,6 +580,8 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     );
   };
 
+  const isSupportedUploadFile = (file) => isPdfFile(file) || isTextLikeFile(file);
+
   const shouldSkipRepoFile = (file) => {
     const path = getFilePath(file);
     const parts = path.split('/').filter(Boolean);
@@ -583,8 +592,8 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     if (file.size > MAX_REPO_FILE_BYTES) {
       return `larger than ${Math.round(MAX_REPO_FILE_BYTES / 1024 / 1024)} MB`;
     }
-    if (!isTextLikeFile(file)) {
-      return 'not a supported text/code file';
+    if (!isSupportedUploadFile(file)) {
+      return 'not a supported PDF, text, or code file';
     }
     return '';
   };

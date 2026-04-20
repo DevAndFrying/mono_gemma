@@ -61,7 +61,7 @@ npm run dev
 Open:
 
 - Frontend: http://localhost:5173
-- Backend API: http://localhost:3000/api
+- Backend API: http://localhost:3002/api
 
 ## Docker Startup Modes
 
@@ -143,7 +143,7 @@ For local dev, create or edit `backend/.env`:
 ```env
 OLLAMA_BASE_URL=http://localhost:11434
 MODEL_NAME=gemma3:4b
-API_PORT=3000
+API_PORT=3002
 MCP_PORT=3001
 WEAVIATE_URL=http://localhost:8080
 DATABASE_URL=postgresql://mcp:mcp_dev_password@localhost:5432/mcp_gemma
@@ -156,6 +156,7 @@ WEAVIATE_ENABLE_PQ=false
 WEAVIATE_PQ_TRAINING_LIMIT=50000
 WEAVIATE_CONTEXT_RESULTS=8
 WEAVIATE_CONTEXT_CHARS=16000
+MAX_UPLOAD_FILE_BYTES=20971520
 OLLAMA_MODEL_CACHE_MS=30000
 OLLAMA_KEEP_ALIVE=10m
 SUGGESTED_MODELS=gemma4:e4b,gemma4:26b,gemma4:31b
@@ -212,7 +213,7 @@ Upload behavior:
 - Text/code files are read in the browser.
 - Repo uploads skip common generated folders such as `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs, and cache folders.
 - Repo uploads skip unsupported binary files.
-- Repo uploads skip files larger than 2 MB by default.
+- Repo uploads skip files larger than 20 MB by default.
 - Backend skips duplicates already in the target Weaviate collection with the same `filePath`.
 - Uploads are batched to avoid oversized JSON requests.
 
