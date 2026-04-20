@@ -1,6 +1,6 @@
 # MCP Gemma Monolith
 
-A local chat and RAG app that connects a React frontend, an Express/WebSocket backend, Ollama models, and Weaviate vector search.
+A local chat and RAG app that connects a React frontend, an Express/WebSocket backend, Ollama models, Weaviate vector search, and PostgreSQL with pgvector.
 
 The app can run against Ollama on your host machine or an Ollama Docker container. It can use an NVIDIA GPU when available and falls back to CPU mode when it is not.
 
@@ -11,6 +11,7 @@ The app can run against Ollama on your host machine or an Ollama Docker containe
 - Host Ollama mode for using models already installed on your system.
 - Docker Ollama mode for isolated container-based model storage.
 - Weaviate-backed file and repository upload for RAG.
+- PostgreSQL 16 with pgvector in the Docker stack for relational/vector storage.
 - Repo upload filtering for generated folders, binary files, large files, and duplicate `filePath` values.
 - RAG answers with source metadata and clickable source links.
 - Saved chats in browser storage.
@@ -48,6 +49,7 @@ Open:
 - App: http://localhost:3000
 - Backend API: http://localhost:3000/api
 - Weaviate: http://localhost:8080
+- PostgreSQL: localhost:5432
 
 For local development without Docker:
 
@@ -144,7 +146,13 @@ MODEL_NAME=gemma3:4b
 API_PORT=3000
 MCP_PORT=3001
 WEAVIATE_URL=http://localhost:8080
-WEAVIATE_ENABLE_PQ=true
+DATABASE_URL=postgresql://mcp:mcp_dev_password@localhost:5432/mcp_gemma
+PGHOST=localhost
+PGPORT=5432
+PGDATABASE=mcp_gemma
+PGUSER=mcp
+PGPASSWORD=mcp_dev_password
+WEAVIATE_ENABLE_PQ=false
 WEAVIATE_PQ_TRAINING_LIMIT=50000
 WEAVIATE_CONTEXT_RESULTS=8
 WEAVIATE_CONTEXT_CHARS=16000
@@ -155,6 +163,42 @@ NODE_ENV=development
 ```
 
 For Docker, the backend environment is in `docker-compose.yml`.
+
+## PostgreSQL And pgvector
+
+The Docker stack includes a PostgreSQL 16 container with pgvector enabled:
+
+```text
+Service: postgres
+Container: mcp-postgres
+Database: mcp_gemma
+User: mcp
+Password: mcp_dev_password
+Host from Docker network: postgres:5432
+Host from your machine: localhost:5432
+```
+
+Use the Docker network connection string from containers:
+
+```env
+DATABASE_URL=postgresql://mcp:mcp_dev_password@postgres:5432/mcp_gemma
+```
+
+Use the localhost connection string from local development:
+
+```env
+DATABASE_URL=postgresql://mcp:mcp_dev_password@localhost:5432/mcp_gemma
+```
+
+The init script at `docker/postgres/init/001-enable-pgvector.sql` runs on first database creation and enables the `vector` extension. If you already have an existing `postgres_data` volume from before this setup, recreate the volume or run `CREATE EXTENSION IF NOT EXISTS vector;` manually.
+
+Check pgvector:
+
+```bash
+docker exec -it mcp-postgres psql -U mcp -d mcp_gemma -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
+PostgreSQL is on the same Docker network as the backend, Weaviate, and Ollama. The current app still uses Weaviate for uploaded-document RAG and Ollama for model responses; PostgreSQL is ready for additional app persistence or custom pgvector workflows.
 
 ## Uploads And RAG
 
@@ -410,6 +454,13 @@ curl http://localhost:8080/v1/schema
 curl http://localhost:3000/api/weaviate/health
 ```
 
+Check PostgreSQL and pgvector:
+
+```bash
+docker exec -it mcp-postgres pg_isready -U mcp -d mcp_gemma
+docker exec -it mcp-postgres psql -U mcp -d mcp_gemma -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
 Check GPU:
 
 ```bash
@@ -428,6 +479,7 @@ docker compose down
 
 - The selected Ollama model is used for answering questions, not for uploading files.
 - Weaviate vectorization is handled by the `t2v-transformers` sidecar.
+- PostgreSQL with pgvector is available for app data or custom vector tables, but Weaviate remains the default RAG store.
 - If you change the Weaviate embedding model, re-index or re-upload documents for consistent vectors.
 - The frontend build may warn about large chunks because `pdfjs-dist` is large. The warning does not block the build.
 

@@ -19,7 +19,7 @@ const wss = new WebSocketServer({
   }
 });
 
-// Configuration
+// Configuration for the application, with environment variables and defaults
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
 const MODEL_NAME = process.env.MODEL_NAME || 'gemma3:4b';
 const API_PORT = process.env.API_PORT || 3000;

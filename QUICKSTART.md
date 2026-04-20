@@ -61,6 +61,8 @@ npm run dev
 Docker:
 
 - http://localhost:3000
+- Weaviate: http://localhost:8080
+- PostgreSQL with pgvector: localhost:5432
 
 Local dev:
 
@@ -158,6 +160,13 @@ Check Weaviate:
 curl http://localhost:8080/v1/schema
 ```
 
+Check PostgreSQL and pgvector:
+
+```bash
+docker exec -it mcp-postgres pg_isready -U mcp -d mcp_gemma
+docker exec -it mcp-postgres psql -U mcp -d mcp_gemma -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
 ## 10. Reset Weaviate
 
 Drop all uploaded documents/vectors:
@@ -166,6 +175,19 @@ Drop all uploaded documents/vectors:
 docker compose down
 docker volume ls | grep weaviate
 docker volume rm mono_gemma_weaviate_data
+./docker-start.sh
+```
+
+If the volume name differs, use the name printed by `docker volume ls`.
+
+## 11. Reset PostgreSQL
+
+Drop the PostgreSQL data volume:
+
+```bash
+docker compose down
+docker volume ls | grep postgres
+docker volume rm mono_gemma_postgres_data
 ./docker-start.sh
 ```
 
