@@ -124,4 +124,8 @@
     width: 100%;
     max-width: none;
   }
+
+  .export-chat-controls {
+    justify-content: flex-end;
+  }
 }

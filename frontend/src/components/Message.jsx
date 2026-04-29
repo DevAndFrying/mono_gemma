@@ -133,7 +133,7 @@ const renderFormattedContent = (text) => {
   return blocks;
 };
 
-function Message({ role, content, thinking, showLoading, sources = [] }) {
+function Message({ role, content, thinking, showLoading, sources = [], collapseSourcesSignal = 0 }) {
   const [showThinking, setShowThinking] = useState(false);
   const [showSources, setShowSources] = useState(false);
   const closeSourcesTimeoutRef = useRef(null);
@@ -159,7 +159,16 @@ function Message({ role, content, thinking, showLoading, sources = [] }) {
     }, 3000);
   };
 
+  const closeSources = () => {
+    clearCloseSourcesTimeout();
+    setShowSources(false);
+  };
+
   useEffect(() => () => clearCloseSourcesTimeout(), []);
+
+  useEffect(() => {
+    closeSources();
+  }, [collapseSourcesSignal]);
 
   return (
     <div className={`message message-${role}`}>
@@ -199,7 +208,12 @@ function Message({ role, content, thinking, showLoading, sources = [] }) {
             onMouseEnter={openSources}
             onMouseLeave={scheduleCloseSources}
             onFocus={openSources}
-            onBlur={scheduleCloseSources}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) {
+                closeSources();
+              }
+            }}
+            onClick={(event) => event.stopPropagation()}
             tabIndex={0}
             role="button"
             aria-expanded={showSources}

@@ -25,7 +25,7 @@ const MODEL_NAME = process.env.MODEL_NAME || 'gemma3:4b';
 const API_PORT = process.env.API_PORT || 3000;
 const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
-const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'UploadedFile';
+const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'uploaded_files';
 const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 20 * 1024 * 1024);
 const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 8);
 const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 16000);
@@ -53,8 +53,8 @@ let ollamaModelCache = null;
 
 const normalizeWeaviateClassName = (className) => {
   const trimmed = (className || DEFAULT_WEAVIATE_FILE_CLASS).trim();
-  if (!/^[A-Z][A-Za-z0-9_]*$/.test(trimmed)) {
-    throw new Error('Collection name must start with an uppercase letter and contain only letters, numbers, or underscores.');
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(trimmed)) {
+    throw new Error('Collection name must start with a letter and contain only letters, numbers, or underscores.');
   }
   return trimmed;
 };

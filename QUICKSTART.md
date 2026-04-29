@@ -97,7 +97,7 @@ Repo uploads:
 - Preserve relative paths as `filePath`.
 - Skip `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs, cache folders, binaries, and large files.
 - Skip duplicates already in Weaviate with the same `filePath`.
-- Store documents in the default `UploadedFile` collection.
+- Store documents in the default `uploaded_files` collection.
 
 ## 7. Ask Questions
 

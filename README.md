@@ -220,7 +220,7 @@ Upload behavior:
 The visible collection selector was removed from the UI. The app uses the default Weaviate class:
 
 ```text
-UploadedFile
+uploaded_files
 ```
 
 Stored properties include:
@@ -287,7 +287,7 @@ If your volume name differs, replace `mono_gemma_weaviate_data` with the value f
 Delete specific files by object ID:
 
 ```bash
-curl -X DELETE http://localhost:8080/v1/objects/UploadedFile/YOUR_OBJECT_ID
+curl -X DELETE http://localhost:8080/v1/objects/uploaded_files/YOUR_OBJECT_ID
 ```
 
 Find objects by `filePath`:
@@ -296,7 +296,7 @@ Find objects by `filePath`:
 curl -s http://localhost:8080/v1/graphql \
   -H 'Content-Type: application/json' \
   -d '{
-    "query": "{ Get { UploadedFile(where: { path: [\"filePath\"], operator: Like, valueText: \"*cve*\" }) { fileName filePath _additional { id } } } }"
+    "query": "{ Get { uploaded_files(where: { path: [\"filePath\"], operator: Like, valueText: \"*cve*\" }) { fileName filePath _additional { id } } } }"
   }'
 ```
 
@@ -321,7 +321,7 @@ curl -X POST http://localhost:3000/api/chat \
   -H 'Content-Type: application/json' \
   -d '{
     "message": "Summarize the uploaded repo",
-    "className": "UploadedFile",
+    "className": "uploaded_files",
     "model": "gemma4:26b",
     "useWeaviateContext": true
   }'
@@ -333,7 +333,7 @@ Upload files:
 curl -X POST http://localhost:3000/api/weaviate/upload \
   -H 'Content-Type: application/json' \
   -d '{
-    "className": "UploadedFile",
+    "className": "uploaded_files",
     "files": [
       {
         "name": "notes.txt",
@@ -349,7 +349,7 @@ curl -X POST http://localhost:3000/api/weaviate/upload \
 Source lookup:
 
 ```bash
-curl http://localhost:3000/api/weaviate/source/UploadedFile/YOUR_OBJECT_ID
+curl http://localhost:3000/api/weaviate/source/uploaded_files/YOUR_OBJECT_ID
 ```
 
 MCP request endpoint:
