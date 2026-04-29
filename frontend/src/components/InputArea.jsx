@@ -1,4 +1,4 @@
-import React, { useRef, useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import './InputArea.css';
 
 const SUPPORTED_UPLOAD_ACCEPT = [
@@ -61,6 +61,7 @@ function InputArea({
   const [useWeaviateContext, setUseWeaviateContext] = useState(true);
   const [newCollectionName, setNewCollectionName] = useState('');
   const [showLibraryManager, setShowLibraryManager] = useState(false);
+  const [selectedDeleteCollection, setSelectedDeleteCollection] = useState('');
   const fileInputRef = useRef(null);
   const repoInputRef = useRef(null);
 
@@ -87,7 +88,7 @@ function InputArea({
   };
 
   const handleDeleteCollection = () => {
-    onDeleteCollection(selectedUploadCollection);
+    onDeleteCollection(selectedDeleteCollection || selectedUploadCollection);
   };
 
   const handleFileChange = (event, source = 'files') => {
@@ -116,6 +117,13 @@ function InputArea({
         .map(collection => [collection.name, collection])
     ).values()
   ).sort((left, right) => left.name.localeCompare(right.name));
+  const deleteCollectionName = selectedDeleteCollection || collectionOptions[0]?.name || '';
+
+  useEffect(() => {
+    if (selectedDeleteCollection && !collectionOptions.some(collection => collection.name === selectedDeleteCollection)) {
+      setSelectedDeleteCollection('');
+    }
+  }, [collectionOptions, selectedDeleteCollection]);
   const contextSummary = selectedContextCollections.length
     ? `${selectedContextCollections.length} expert${selectedContextCollections.length === 1 ? '' : 's'} selected`
     : 'No experts selected';
@@ -164,6 +172,18 @@ function InputArea({
       </div>
       {showLibraryManager && (
         <div className="library-manager">
+          <div className="library-manager-header">
+            <span>Manage experts</span>
+            <button
+              type="button"
+              className="library-manager-close"
+              onClick={() => setShowLibraryManager(false)}
+              aria-label="Close expert library manager"
+              title="Close expert library manager"
+            >
+              X
+            </button>
+          </div>
           <input
             ref={fileInputRef}
             type="file"
@@ -210,7 +230,7 @@ function InputArea({
                 onClick={() => fileInputRef.current?.click()}
                 title="Upload PDF, text, or code files to Weaviate"
               >
-                {uploadLoading ? 'Uploading...' : 'Upload files to Weaviate'}
+                {uploadLoading ? 'Uploading...' : 'Upload file'}
               </button>
               <button
                 type="button"
@@ -245,15 +265,32 @@ function InputArea({
               Create library
             </button>
           </div>
-          <button
-            type="button"
-            className="delete-library-button"
-            disabled={uploadDisabled || uploadLoading || collectionLoading || !selectedUploadCollection}
-            onClick={handleDeleteCollection}
-            title="Delete the selected Weaviate expert library"
-          >
-            Delete library
-          </button>
+          <div className="library-delete">
+            <label className="library-field" htmlFor="delete-collection-select">
+              <span>Delete expert library</span>
+              <select
+                id="delete-collection-select"
+                value={deleteCollectionName}
+                onChange={(event) => setSelectedDeleteCollection(event.target.value)}
+                disabled={uploadDisabled || uploadLoading || collectionLoading}
+              >
+                {collectionOptions.map(collection => (
+                  <option key={collection.name} value={collection.name}>
+                    {collection.name}
+                  </option>
+                ))}
+              </select>
+            </label>
+            <button
+              type="button"
+              className="delete-library-button"
+              disabled={uploadDisabled || uploadLoading || collectionLoading || !deleteCollectionName}
+              onClick={handleDeleteCollection}
+              title="Delete the selected Weaviate expert library"
+            >
+              Delete library
+            </button>
+          </div>
         </div>
       )}
       <div className="input-wrapper">

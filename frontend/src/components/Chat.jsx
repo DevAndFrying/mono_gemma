@@ -166,12 +166,14 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [collapseSourcesSignal, setCollapseSourcesSignal] = useState(0);
+  const [showDeleteChatConfirm, setShowDeleteChatConfirm] = useState(false);
   const [collections, setCollections] = useState([]);
   const [collectionLoading, setCollectionLoading] = useState(false);
   const [selectedUploadCollection, setSelectedUploadCollection] = useState(() => loadStoredString(UPLOAD_COLLECTION_STORAGE_KEY, DEFAULT_WEAVIATE_COLLECTION));
   const [selectedContextCollections, setSelectedContextCollections] = useState(() => loadStoredArray(SELECTED_CONTEXT_COLLECTIONS_STORAGE_KEY, [DEFAULT_WEAVIATE_COLLECTION]));
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef(null);
+  const deleteChatConfirmRef = useRef(null);
   const messagesEndRef = useRef(null);
   const hasShownModelLoadingRef = useRef(false);
   const chatStatusTimeoutRef = useRef(null);
@@ -418,6 +420,32 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   }, [messages]);
 
   useEffect(() => {
+    if (!showDeleteChatConfirm) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event) => {
+      if (!deleteChatConfirmRef.current?.contains(event.target)) {
+        setShowDeleteChatConfirm(false);
+      }
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setShowDeleteChatConfirm(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showDeleteChatConfirm]);
+
+  useEffect(() => {
     window.clearTimeout(autoSaveTimeoutRef.current);
     if (messages.length === 0) {
       return undefined;
@@ -512,6 +540,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     skipNextAutoSaveRef.current = true;
     setSavedChats(nextChats);
     setActiveSavedChatId('');
+    setShowDeleteChatConfirm(false);
     showChatStatus('Saved chat deleted.');
   };
 
@@ -956,9 +985,37 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
           <button type="button" onClick={handleNewChat} disabled={messages.length === 0 && !activeSavedChatId}>
             New chat
           </button>
-          <button type="button" onClick={handleDeleteSavedChat} disabled={!activeSavedChatId}>
-            Delete saved
-          </button>
+          <div
+            className="delete-chat-confirm-menu"
+            ref={deleteChatConfirmRef}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) {
+                setShowDeleteChatConfirm(false);
+              }
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setShowDeleteChatConfirm(current => !current)}
+              disabled={!activeSavedChatId}
+              aria-expanded={showDeleteChatConfirm}
+            >
+              Delete saved
+            </button>
+            {showDeleteChatConfirm && (
+              <div className="delete-chat-confirm-popover">
+                <span>Delete this saved chat?</span>
+                <div className="delete-chat-confirm-actions">
+                  <button type="button" className="delete-chat-confirm-cancel" onClick={() => setShowDeleteChatConfirm(false)}>
+                    Cancel
+                  </button>
+                  <button type="button" className="delete-chat-confirm-delete" onClick={handleDeleteSavedChat}>
+                    Delete
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="export-chat-controls">
           <button type="button" onClick={() => handleExportChat('markdown')} disabled={messages.length === 0}>
