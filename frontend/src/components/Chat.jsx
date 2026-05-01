@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import './Chat.css';
@@ -9,7 +10,12 @@ pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
 const UPLOAD_BATCH_FILE_LIMIT = 25;
 const UPLOAD_BATCH_BYTE_LIMIT = 8 * 1024 * 1024;
-const MAX_REPO_FILE_BYTES = 2 * 1024 * 1024;
+const MAX_REPO_FILE_BYTES = 20 * 1024 * 1024;
+const PDF_FILE_EXTENSIONS = new Set(['.pdf']);
+const POWERPOINT_FILE_EXTENSIONS = new Set(['.pptx']);
+const POWERPOINT_MIME_TYPES = new Set([
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+]);
 const IGNORED_REPO_DIRECTORIES = new Set([
   '.cache',
   '.git',
@@ -76,6 +82,10 @@ const TEXT_FILE_NAMES = new Set([
   'README',
 ]);
 const SAVED_CHATS_STORAGE_KEY = 'mcp-gemma-saved-chats';
+const SELECTED_CONTEXT_COLLECTIONS_STORAGE_KEY = 'mcp-gemma-context-collections';
+const UPLOAD_COLLECTION_STORAGE_KEY = 'mcp-gemma-upload-collection';
+const DEFAULT_WEAVIATE_COLLECTION = 'uploaded_files';
+const AUTO_SAVE_DELAY_MS = 700;
 
 const createChatTitle = (messages) => {
   const firstUserMessage = messages.find(message => message.role === 'user' && message.content?.trim());
@@ -97,6 +107,23 @@ const loadSavedChats = () => {
 
 const persistSavedChats = (chats) => {
   localStorage.setItem(SAVED_CHATS_STORAGE_KEY, JSON.stringify(chats));
+};
+
+const loadStoredString = (key, fallback = '') => {
+  try {
+    return localStorage.getItem(key) || fallback;
+  } catch {
+    return fallback;
+  }
+};
+
+const loadStoredArray = (key, fallback = []) => {
+  try {
+    const parsed = JSON.parse(localStorage.getItem(key) || '[]');
+    return Array.isArray(parsed) ? parsed.filter(item => typeof item === 'string' && item.trim()) : fallback;
+  } catch {
+    return fallback;
+  }
 };
 
 const downloadFile = (filename, content, type) => {
@@ -143,11 +170,20 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const [chatStatus, setChatStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
+  const [collapseSourcesSignal, setCollapseSourcesSignal] = useState(0);
+  const [showDeleteChatConfirm, setShowDeleteChatConfirm] = useState(false);
+  const [collections, setCollections] = useState([]);
+  const [collectionLoading, setCollectionLoading] = useState(false);
+  const [selectedUploadCollection, setSelectedUploadCollection] = useState(() => loadStoredString(UPLOAD_COLLECTION_STORAGE_KEY, DEFAULT_WEAVIATE_COLLECTION));
+  const [selectedContextCollections, setSelectedContextCollections] = useState(() => loadStoredArray(SELECTED_CONTEXT_COLLECTIONS_STORAGE_KEY, [DEFAULT_WEAVIATE_COLLECTION]));
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef(null);
+  const deleteChatConfirmRef = useRef(null);
   const messagesEndRef = useRef(null);
   const hasShownModelLoadingRef = useRef(false);
   const chatStatusTimeoutRef = useRef(null);
+  const autoSaveTimeoutRef = useRef(null);
+  const skipNextAutoSaveRef = useRef(false);
   const reconnectAfterCloseRef = useRef(false);
 
   const replaceLastUploadStatus = (message) => {
@@ -163,6 +199,46 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       }
       return [...updated, message];
     });
+  };
+
+  const refreshCollections = async () => {
+    if (weaviateInfo?.status !== 'ready') {
+      return;
+    }
+
+    setCollectionLoading(true);
+    try {
+      const response = await fetch('/api/weaviate/collections');
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to load Weaviate collections');
+      }
+
+      const defaultCollection = data.defaultCollection || DEFAULT_WEAVIATE_COLLECTION;
+      const nextCollections = Array.isArray(data.collections) ? data.collections : [];
+      const names = new Set(nextCollections.map(collection => collection.name));
+      if (!names.has(defaultCollection)) {
+        nextCollections.push({ name: defaultCollection });
+      }
+
+      setCollections(currentCollections => {
+        const byName = new Map();
+        [...currentCollections, ...nextCollections].forEach((collection) => {
+          if (collection?.name) {
+            byName.set(collection.name, collection);
+          }
+        });
+        return Array.from(byName.values()).sort((left, right) => left.name.localeCompare(right.name));
+      });
+
+      setSelectedUploadCollection(current => current || defaultCollection);
+      setSelectedContextCollections(current => (current.length ? current : [defaultCollection]));
+    } catch (error) {
+      console.error('Failed to refresh Weaviate collections:', error);
+      showChatStatus(error.message);
+    } finally {
+      setCollectionLoading(false);
+    }
   };
 
   const connectWebSocket = () => {
@@ -333,8 +409,63 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   }, []);
 
   useEffect(() => {
+    refreshCollections();
+  }, [weaviateInfo?.status]);
+
+  useEffect(() => {
+    localStorage.setItem(UPLOAD_COLLECTION_STORAGE_KEY, selectedUploadCollection);
+  }, [selectedUploadCollection]);
+
+  useEffect(() => {
+    localStorage.setItem(SELECTED_CONTEXT_COLLECTIONS_STORAGE_KEY, JSON.stringify(selectedContextCollections));
+  }, [selectedContextCollections]);
+
+  useEffect(() => {
     messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
   }, [messages]);
+
+  useEffect(() => {
+    if (!showDeleteChatConfirm) {
+      return undefined;
+    }
+
+    const handlePointerDown = (event) => {
+      if (!deleteChatConfirmRef.current?.contains(event.target)) {
+        setShowDeleteChatConfirm(false);
+      }
+    };
+
+    const handleKeyDown = (event) => {
+      if (event.key === 'Escape') {
+        setShowDeleteChatConfirm(false);
+      }
+    };
+
+    document.addEventListener('pointerdown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+
+    return () => {
+      document.removeEventListener('pointerdown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [showDeleteChatConfirm]);
+
+  useEffect(() => {
+    window.clearTimeout(autoSaveTimeoutRef.current);
+    if (messages.length === 0) {
+      return undefined;
+    }
+    if (skipNextAutoSaveRef.current) {
+      skipNextAutoSaveRef.current = false;
+      return undefined;
+    }
+
+    autoSaveTimeoutRef.current = window.setTimeout(() => {
+      saveChatSnapshot(messages);
+    }, AUTO_SAVE_DELAY_MS);
+
+    return () => window.clearTimeout(autoSaveTimeoutRef.current);
+  }, [messages, selectedModel, activeSavedChatId]);
 
   const showChatStatus = (status) => {
     setChatStatus(status);
@@ -342,30 +473,43 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     chatStatusTimeoutRef.current = window.setTimeout(() => setChatStatus(''), 3000);
   };
 
-  const handleSaveChat = () => {
-    if (messages.length === 0) {
-      showChatStatus('No messages to save.');
-      return;
+  const saveChatSnapshot = (chatMessages, { showStatus = false } = {}) => {
+    if (chatMessages.length === 0) {
+      if (showStatus) {
+        showChatStatus('No messages to save.');
+      }
+      return '';
     }
 
     const now = new Date().toISOString();
     const id = activeSavedChatId || `chat-${Date.now()}`;
-    const savedChat = {
-      id,
-      title: createChatTitle(messages),
-      model: selectedModel,
-      updatedAt: now,
-      messages,
-    };
-    const nextChats = [
-      savedChat,
-      ...savedChats.filter(chat => chat.id !== id),
-    ].slice(0, 50);
+    setSavedChats(prevChats => {
+      const existingChat = prevChats.find(chat => chat.id === id);
+      const savedChat = {
+        id,
+        title: existingChat?.title || createChatTitle(chatMessages),
+        model: selectedModel,
+        updatedAt: now,
+        messages: chatMessages,
+      };
+      const nextChats = [
+        savedChat,
+        ...prevChats.filter(chat => chat.id !== id),
+      ].slice(0, 50);
+      persistSavedChats(nextChats);
+      return nextChats;
+    });
+    if (activeSavedChatId !== id) {
+      setActiveSavedChatId(id);
+    }
+    if (showStatus) {
+      showChatStatus('Chat saved.');
+    }
+    return id;
+  };
 
-    persistSavedChats(nextChats);
-    setSavedChats(nextChats);
-    setActiveSavedChatId(id);
-    showChatStatus('Chat saved.');
+  const handleSaveChat = () => {
+    saveChatSnapshot(messages, { showStatus: true });
   };
 
   const handleLoadChat = (chatId) => {
@@ -391,6 +535,41 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     showChatStatus('Started a new chat.');
   };
 
+  const handleRenameSavedChat = () => {
+    if (!activeSavedChatId) {
+      showChatStatus('Select a saved chat first.');
+      return;
+    }
+
+    const savedChat = savedChats.find(chat => chat.id === activeSavedChatId);
+    if (!savedChat) {
+      showChatStatus('Saved chat not found.');
+      return;
+    }
+
+    const title = window.prompt('Rename saved chat', savedChat.title || '');
+    if (title === null) {
+      return;
+    }
+
+    const trimmedTitle = title.replace(/\s+/g, ' ').trim();
+    if (!trimmedTitle) {
+      showChatStatus('Enter a chat name first.');
+      return;
+    }
+
+    setSavedChats(prevChats => {
+      const nextChats = prevChats.map(chat => (
+        chat.id === activeSavedChatId
+          ? { ...chat, title: trimmedTitle }
+          : chat
+      ));
+      persistSavedChats(nextChats);
+      return nextChats;
+    });
+    showChatStatus('Chat renamed.');
+  };
+
   const handleDeleteSavedChat = () => {
     if (!activeSavedChatId) {
       showChatStatus('Select a saved chat first.');
@@ -398,8 +577,10 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     }
     const nextChats = savedChats.filter(chat => chat.id !== activeSavedChatId);
     persistSavedChats(nextChats);
+    skipNextAutoSaveRef.current = true;
     setSavedChats(nextChats);
     setActiveSavedChatId('');
+    setShowDeleteChatConfirm(false);
     showChatStatus('Saved chat deleted.');
   };
 
@@ -426,7 +607,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     showChatStatus(`Exported ${format.toUpperCase()}.`);
   };
 
-  const handleSendMessage = async (text, className, useWeaviateContext = true) => {
+  const handleSendMessage = async (text, classNames, useWeaviateContext = true, generationOptions = {}) => {
     if (!text.trim() || !connected || !wsConnected) {
       if (!wsConnected) {
         console.warn('WebSocket not connected yet. Try again in a moment.');
@@ -438,7 +619,6 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     const userMessage = { role: 'user', content: text };
     const assistantPlaceholder = { role: 'assistant', content: '', showLoading: false, hasStarted: false };
     setMessages(prev => [...prev, userMessage, assistantPlaceholder]);
-    setActiveSavedChatId('');
     setLoading(true);
 
     // Show the model-loading notice once, after 2 seconds if no response yet.
@@ -471,7 +651,15 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       wsRef.current.send(
         JSON.stringify({
           type: 'message',
-          payload: { text, className, model: selectedModel, useWeaviateContext },
+          payload: {
+            text,
+            classNames: Array.isArray(classNames) ? classNames : [classNames].filter(Boolean),
+            model: selectedModel,
+            useWeaviateContext,
+            temperature: generationOptions.temperature,
+            top_p: generationOptions.top_p,
+            contextChars: generationOptions.contextChars,
+          },
         })
       );
     } else {
@@ -545,10 +733,58 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     return pages.join('\n\n');
   };
 
+  const decodeXmlEntities = (text) => {
+    const parser = new DOMParser();
+    return parser.parseFromString(`<text>${text}</text>`, 'application/xml').documentElement.textContent || '';
+  };
+
+  const extractPowerPointText = async (file) => {
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const slideEntries = Object.values(zip.files)
+      .filter(entry => /^ppt\/slides\/slide\d+\.xml$/i.test(entry.name))
+      .sort((first, second) => {
+        const firstNumber = Number(first.name.match(/slide(\d+)\.xml$/i)?.[1] || 0);
+        const secondNumber = Number(second.name.match(/slide(\d+)\.xml$/i)?.[1] || 0);
+        return firstNumber - secondNumber;
+      });
+
+    const slides = [];
+    for (const entry of slideEntries) {
+      const xml = await entry.async('text');
+      const text = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)]
+        .map(match => decodeXmlEntities(match[1]))
+        .map(part => part.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .join(' ');
+
+      if (text) {
+        const slideNumber = entry.name.match(/slide(\d+)\.xml$/i)?.[1];
+        slides.push(`Slide ${slideNumber}\n${text}`);
+      }
+    }
+
+    return slides.join('\n\n');
+  };
+
+  const isPdfFile = (file) => {
+    const path = getFilePath(file);
+    const fileName = path.split('/').pop() || file.name;
+    return file.type === 'application/pdf' || PDF_FILE_EXTENSIONS.has(getFileExtension(fileName));
+  };
+
+  const isPowerPointFile = (file) => {
+    const path = getFilePath(file);
+    const fileName = path.split('/').pop() || file.name;
+    return POWERPOINT_MIME_TYPES.has(file.type) || POWERPOINT_FILE_EXTENSIONS.has(getFileExtension(fileName));
+  };
+
   const extractFileText = async (file) => {
-    const isPdf = file.type === 'application/pdf' || file.name.toLowerCase().endsWith('.pdf');
+    const isPdf = isPdfFile(file);
     if (isPdf) {
       return extractPdfText(file);
+    }
+    if (isPowerPointFile(file)) {
+      return extractPowerPointText(file);
     }
     return file.text();
   };
@@ -573,6 +809,8 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     );
   };
 
+  const isSupportedUploadFile = (file) => isPdfFile(file) || isPowerPointFile(file) || isTextLikeFile(file);
+
   const shouldSkipRepoFile = (file) => {
     const path = getFilePath(file);
     const parts = path.split('/').filter(Boolean);
@@ -583,8 +821,8 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     if (file.size > MAX_REPO_FILE_BYTES) {
       return `larger than ${Math.round(MAX_REPO_FILE_BYTES / 1024 / 1024)} MB`;
     }
-    if (!isTextLikeFile(file)) {
-      return 'not a supported text/code file';
+    if (!isSupportedUploadFile(file)) {
+      return 'not a supported PDF, PowerPoint, text, or code file';
     }
     return '';
   };
@@ -682,7 +920,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       const batches = createUploadBatches(prepared);
       const uploaded = [];
       const skippedDuplicates = [];
-      let uploadedClassName = className || 'UploadedFile';
+      let uploadedClassName = className || DEFAULT_WEAVIATE_COLLECTION;
 
       for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
         const batch = batches[batchIndex];
@@ -727,6 +965,88 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     }
   };
 
+  const handleCreateCollection = async (rawCollectionName) => {
+    const className = rawCollectionName.trim();
+    if (!className) {
+      showChatStatus('Enter a library name first.');
+      return false;
+    }
+
+    setCollectionLoading(true);
+    try {
+      const response = await fetch('/api/weaviate/collections', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ className }),
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to create Weaviate library');
+      }
+
+      const collection = data.collection || { name: className };
+      setCollections(currentCollections => {
+        const byName = new Map(currentCollections.map(item => [item.name, item]));
+        byName.set(collection.name, collection);
+        return Array.from(byName.values()).sort((left, right) => left.name.localeCompare(right.name));
+      });
+      setSelectedUploadCollection(collection.name);
+      setSelectedContextCollections(current => (
+        current.includes(collection.name) ? current : [...current, collection.name]
+      ));
+      showChatStatus(`Created ${collection.name}.`);
+      return true;
+    } catch (error) {
+      showChatStatus(error.message);
+      return false;
+    } finally {
+      setCollectionLoading(false);
+    }
+  };
+
+  const handleDeleteCollection = async (className) => {
+    const collectionName = className?.trim();
+    if (!collectionName) {
+      showChatStatus('Select a library to delete first.');
+      return;
+    }
+
+    const confirmed = window.confirm(
+      `Delete expert library "${collectionName}" and all files stored in it? This cannot be undone.`
+    );
+    if (!confirmed) {
+      return;
+    }
+
+    setCollectionLoading(true);
+    try {
+      const response = await fetch(`/api/weaviate/collections/${encodeURIComponent(collectionName)}`, {
+        method: 'DELETE',
+      });
+      const data = await response.json();
+      if (!response.ok) {
+        throw new Error(data.error || 'Failed to delete Weaviate library');
+      }
+
+      const remainingCollections = collections
+        .filter(collection => collection.name !== collectionName)
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const fallbackCollection = remainingCollections[0]?.name || DEFAULT_WEAVIATE_COLLECTION;
+
+      setCollections(remainingCollections);
+      setSelectedUploadCollection(current => (current === collectionName ? fallbackCollection : current));
+      setSelectedContextCollections(current => {
+        const nextCollections = current.filter(name => name !== collectionName);
+        return nextCollections.length ? nextCollections : (remainingCollections.length ? [fallbackCollection] : []);
+      });
+      showChatStatus(`Deleted ${data.deleted || collectionName}.`);
+    } catch (error) {
+      showChatStatus(error.message);
+    } finally {
+      setCollectionLoading(false);
+    }
+  };
+
   return (
     <div className="chat-container">
       <div className="chat-toolbar">
@@ -750,9 +1070,40 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
           <button type="button" onClick={handleNewChat} disabled={messages.length === 0 && !activeSavedChatId}>
             New chat
           </button>
-          <button type="button" onClick={handleDeleteSavedChat} disabled={!activeSavedChatId}>
-            Delete saved
+          <button type="button" onClick={handleRenameSavedChat} disabled={!activeSavedChatId}>
+            Rename chat
           </button>
+          <div
+            className="delete-chat-confirm-menu"
+            ref={deleteChatConfirmRef}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) {
+                setShowDeleteChatConfirm(false);
+              }
+            }}
+          >
+            <button
+              type="button"
+              onClick={() => setShowDeleteChatConfirm(current => !current)}
+              disabled={!activeSavedChatId}
+              aria-expanded={showDeleteChatConfirm}
+            >
+              Delete selected chat
+            </button>
+            {showDeleteChatConfirm && (
+              <div className="delete-chat-confirm-popover">
+                <span>Delete this saved chat?</span>
+                <div className="delete-chat-confirm-actions">
+                  <button type="button" className="delete-chat-confirm-cancel" onClick={() => setShowDeleteChatConfirm(false)}>
+                    Cancel
+                  </button>
+                  <button type="button" className="delete-chat-confirm-delete" onClick={handleDeleteSavedChat}>
+                    Delete
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
         <div className="export-chat-controls">
           <button type="button" onClick={() => handleExportChat('markdown')} disabled={messages.length === 0}>
@@ -764,7 +1115,10 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
           {chatStatus && <span className="chat-toolbar-status">{chatStatus}</span>}
         </div>
       </div>
-      <div className="messages-area">
+      <div
+        className="messages-area"
+        onClick={() => setCollapseSourcesSignal(signal => signal + 1)}
+      >
         {messages.length === 0 && (
           <div className="empty-state">
             <div className="empty-icon">AI</div>
@@ -780,6 +1134,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
             thinking={msg.thinking}
             showLoading={msg.showLoading}
             sources={msg.sources}
+            collapseSourcesSignal={collapseSourcesSignal}
           />
         ))}
         <div ref={messagesEndRef} />
@@ -788,11 +1143,19 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
         onSendMessage={handleSendMessage}
         onStopChat={handleStopChat}
         onUploadFiles={handleUploadFiles}
+        onCreateCollection={handleCreateCollection}
+        onDeleteCollection={handleDeleteCollection}
         disabled={!connected || loading || !wsConnected || uploading}
         uploadDisabled={!connected || uploading || weaviateInfo?.status !== 'ready'}
         uploadStatus={weaviateInfo}
         loading={loading}
         uploadLoading={uploading}
+        collections={collections}
+        selectedUploadCollection={selectedUploadCollection}
+        onUploadCollectionChange={setSelectedUploadCollection}
+        selectedContextCollections={selectedContextCollections}
+        onContextCollectionsChange={setSelectedContextCollections}
+        collectionLoading={collectionLoading}
       />
     </div>
   );
