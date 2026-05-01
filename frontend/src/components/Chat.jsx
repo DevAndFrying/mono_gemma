@@ -1,4 +1,5 @@
 import React, { useState, useEffect, useRef } from 'react';
+import JSZip from 'jszip';
 import * as pdfjsLib from 'pdfjs-dist';
 import pdfWorkerUrl from 'pdfjs-dist/build/pdf.worker.mjs?url';
 import './Chat.css';
@@ -11,6 +12,10 @@ const UPLOAD_BATCH_FILE_LIMIT = 25;
 const UPLOAD_BATCH_BYTE_LIMIT = 8 * 1024 * 1024;
 const MAX_REPO_FILE_BYTES = 20 * 1024 * 1024;
 const PDF_FILE_EXTENSIONS = new Set(['.pdf']);
+const POWERPOINT_FILE_EXTENSIONS = new Set(['.pptx']);
+const POWERPOINT_MIME_TYPES = new Set([
+  'application/vnd.openxmlformats-officedocument.presentationml.presentation',
+]);
 const IGNORED_REPO_DIRECTORIES = new Set([
   '.cache',
   '.git',
@@ -478,15 +483,15 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
 
     const now = new Date().toISOString();
     const id = activeSavedChatId || `chat-${Date.now()}`;
-    const savedChat = {
-      id,
-      title: createChatTitle(chatMessages),
-      model: selectedModel,
-      updatedAt: now,
-      messages: chatMessages,
-    };
-
     setSavedChats(prevChats => {
+      const existingChat = prevChats.find(chat => chat.id === id);
+      const savedChat = {
+        id,
+        title: existingChat?.title || createChatTitle(chatMessages),
+        model: selectedModel,
+        updatedAt: now,
+        messages: chatMessages,
+      };
       const nextChats = [
         savedChat,
         ...prevChats.filter(chat => chat.id !== id),
@@ -528,6 +533,41 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     setMessages([]);
     setActiveSavedChatId('');
     showChatStatus('Started a new chat.');
+  };
+
+  const handleRenameSavedChat = () => {
+    if (!activeSavedChatId) {
+      showChatStatus('Select a saved chat first.');
+      return;
+    }
+
+    const savedChat = savedChats.find(chat => chat.id === activeSavedChatId);
+    if (!savedChat) {
+      showChatStatus('Saved chat not found.');
+      return;
+    }
+
+    const title = window.prompt('Rename saved chat', savedChat.title || '');
+    if (title === null) {
+      return;
+    }
+
+    const trimmedTitle = title.replace(/\s+/g, ' ').trim();
+    if (!trimmedTitle) {
+      showChatStatus('Enter a chat name first.');
+      return;
+    }
+
+    setSavedChats(prevChats => {
+      const nextChats = prevChats.map(chat => (
+        chat.id === activeSavedChatId
+          ? { ...chat, title: trimmedTitle }
+          : chat
+      ));
+      persistSavedChats(nextChats);
+      return nextChats;
+    });
+    showChatStatus('Chat renamed.');
   };
 
   const handleDeleteSavedChat = () => {
@@ -690,16 +730,58 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     return pages.join('\n\n');
   };
 
+  const decodeXmlEntities = (text) => {
+    const parser = new DOMParser();
+    return parser.parseFromString(`<text>${text}</text>`, 'application/xml').documentElement.textContent || '';
+  };
+
+  const extractPowerPointText = async (file) => {
+    const zip = await JSZip.loadAsync(await file.arrayBuffer());
+    const slideEntries = Object.values(zip.files)
+      .filter(entry => /^ppt\/slides\/slide\d+\.xml$/i.test(entry.name))
+      .sort((first, second) => {
+        const firstNumber = Number(first.name.match(/slide(\d+)\.xml$/i)?.[1] || 0);
+        const secondNumber = Number(second.name.match(/slide(\d+)\.xml$/i)?.[1] || 0);
+        return firstNumber - secondNumber;
+      });
+
+    const slides = [];
+    for (const entry of slideEntries) {
+      const xml = await entry.async('text');
+      const text = [...xml.matchAll(/<a:t>([\s\S]*?)<\/a:t>/g)]
+        .map(match => decodeXmlEntities(match[1]))
+        .map(part => part.replace(/\s+/g, ' ').trim())
+        .filter(Boolean)
+        .join(' ');
+
+      if (text) {
+        const slideNumber = entry.name.match(/slide(\d+)\.xml$/i)?.[1];
+        slides.push(`Slide ${slideNumber}\n${text}`);
+      }
+    }
+
+    return slides.join('\n\n');
+  };
+
   const isPdfFile = (file) => {
     const path = getFilePath(file);
     const fileName = path.split('/').pop() || file.name;
     return file.type === 'application/pdf' || PDF_FILE_EXTENSIONS.has(getFileExtension(fileName));
   };
 
+  const isPowerPointFile = (file) => {
+    const path = getFilePath(file);
+    const fileName = path.split('/').pop() || file.name;
+    return POWERPOINT_MIME_TYPES.has(file.type) || POWERPOINT_FILE_EXTENSIONS.has(getFileExtension(fileName));
+  };
+
   const extractFileText = async (file) => {
     const isPdf = isPdfFile(file);
     if (isPdf) {
       return extractPdfText(file);
+    }
+    if (isPowerPointFile(file)) {
+      return extractPowerPointText(file);
     }
     return file.text();
   };
@@ -724,7 +806,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     );
   };
 
-  const isSupportedUploadFile = (file) => isPdfFile(file) || isTextLikeFile(file);
+  const isSupportedUploadFile = (file) => isPdfFile(file) || isPowerPointFile(file) || isTextLikeFile(file);
 
   const shouldSkipRepoFile = (file) => {
     const path = getFilePath(file);
@@ -737,7 +819,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       return `larger than ${Math.round(MAX_REPO_FILE_BYTES / 1024 / 1024)} MB`;
     }
     if (!isSupportedUploadFile(file)) {
-      return 'not a supported PDF, text, or code file';
+      return 'not a supported PDF, PowerPoint, text, or code file';
     }
     return '';
   };
@@ -985,6 +1067,9 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
           <button type="button" onClick={handleNewChat} disabled={messages.length === 0 && !activeSavedChatId}>
             New chat
           </button>
+          <button type="button" onClick={handleRenameSavedChat} disabled={!activeSavedChatId}>
+            Rename chat
+          </button>
           <div
             className="delete-chat-confirm-menu"
             ref={deleteChatConfirmRef}
@@ -1000,7 +1085,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
               disabled={!activeSavedChatId}
               aria-expanded={showDeleteChatConfirm}
             >
-              Delete saved
+              Delete selected chat
             </button>
             {showDeleteChatConfirm && (
               <div className="delete-chat-confirm-popover">

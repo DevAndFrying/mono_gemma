@@ -88,9 +88,11 @@ The model selector lists installed models plus configured suggestions. If you se
 
 ## 6. Upload Files For RAG
 
-Use **Upload files** for PDFs and selected text/code files.
+Use **Upload files** for PDFs, PowerPoint `.pptx` files, and selected text/code files.
 
 Use **Upload repo** to upload a full folder or repository.
+
+Use **Manage** to open the expert library modal, view files in each library, add files or repos, and delete individual files.
 
 Repo uploads:
 

@@ -212,10 +212,11 @@ Upload behavior:
 - PDFs are parsed in the browser with `pdfjs-dist`.
 - Text/code files are read in the browser.
 - Repo uploads skip common generated folders such as `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs, and cache folders.
-- Repo uploads skip unsupported binary files.
+- Repo uploads skip unsupported binary files. Supported document uploads include PDF, PowerPoint `.pptx`, and selected text/code files.
 - Repo uploads skip files larger than 20 MB by default.
 - Backend skips duplicates already in the target Weaviate collection with the same `filePath`.
 - Uploads are batched to avoid oversized JSON requests.
+- The expert library manager modal can list files in each Weaviate library and delete individual files.
 
 The visible collection selector was removed from the UI. The app uses the default Weaviate class:
 
@@ -265,7 +266,8 @@ They do not open arbitrary local filesystem paths directly, because browsers blo
 - **Stop** closes the active WebSocket stream, marks the partial answer complete, and reconnects for the next message.
 - **Save chat** stores the current chat in browser `localStorage`.
 - **Saved chats** loads a previously saved local chat.
-- **Delete saved** removes the selected saved chat.
+- **Rename chat** renames the selected saved chat.
+- **Delete selected chat** removes the selected saved chat.
 - **Export MD** downloads the current chat as Markdown.
 - **Export JSON** downloads the full chat state, including RAG source metadata.
 

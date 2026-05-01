@@ -604,6 +604,71 @@ app.get('/api/weaviate/source/:className/:id', async (req, res) => {
   }
 });
 
+app.get('/api/weaviate/collections/:className/files', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.params.className);
+    const exists = await weaviateClient.schema.exists(className);
+    if (!exists) {
+      res.status(404).json({ error: `Weaviate library "${className}" does not exist.` });
+      return;
+    }
+
+    const result = await weaviateClient.graphql
+      .get()
+      .withClassName(className)
+      .withFields('fileName filePath mimeType size uploadedAt _additional { id }')
+      .withLimit(1000)
+      .do();
+
+    const files = (result?.data?.Get?.[className] || [])
+      .map((file) => ({
+        id: file._additional?.id,
+        fileName: file.fileName,
+        filePath: file.filePath || file.fileName,
+        mimeType: file.mimeType,
+        size: file.size,
+        uploadedAt: file.uploadedAt,
+      }))
+      .filter((file) => typeof file.id === 'string')
+      .sort((left, right) => (left.filePath || '').localeCompare(right.filePath || ''));
+
+    res.json({ className, files, count: files.length });
+  } catch (error) {
+    console.error('Weaviate file list error:', error.message);
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete('/api/weaviate/collections/:className/files/:id', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.params.className);
+    const id = req.params.id;
+    if (!/^[A-Za-z0-9-]+$/.test(id)) {
+      res.status(400).json({ error: 'Invalid file id.' });
+      return;
+    }
+
+    await weaviateClient.data
+      .deleter()
+      .withClassName(className)
+      .withId(id)
+      .do();
+
+    res.json({ deleted: id, className });
+  } catch (error) {
+    console.error('Weaviate file delete error:', error.message);
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.post('/api/chat', async (req, res) => {
   try {
     const { message, className, model, useWeaviateContext = true } = req.body;
