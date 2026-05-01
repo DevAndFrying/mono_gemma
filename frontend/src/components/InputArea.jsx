@@ -98,6 +98,10 @@ function InputArea({
 }) {
   const [input, setInput] = useState('');
   const [useWeaviateContext, setUseWeaviateContext] = useState(true);
+  const [showContextSettings, setShowContextSettings] = useState(true);
+  const [temperature, setTemperature] = useState(0.2);
+  const [topP, setTopP] = useState(0.85);
+  const [contextChars, setContextChars] = useState(16000);
   const [newCollectionName, setNewCollectionName] = useState('');
   const [showLibraryManager, setShowLibraryManager] = useState(false);
   const [selectedDeleteCollection, setSelectedDeleteCollection] = useState('');
@@ -112,7 +116,11 @@ function InputArea({
   const handleSubmit = (e) => {
     e.preventDefault();
     if (input.trim() && !disabled) {
-      onSendMessage(input, selectedContextCollections, useWeaviateContext);
+      onSendMessage(input, selectedContextCollections, useWeaviateContext, {
+        temperature,
+        top_p: topP,
+        contextChars,
+      });
       setInput('');
     }
   };
@@ -245,7 +253,7 @@ function InputArea({
 
   return (
     <form className="input-area" onSubmit={handleSubmit}>
-      <div className="context-library">
+      <div className={`context-library ${showContextSettings ? '' : 'collapsed'}`}>
         <div className="context-library-header">
           <label className="context-toggle">
             <input
@@ -260,6 +268,15 @@ function InputArea({
             <button
               type="button"
               className="library-settings-button"
+              onClick={() => setShowContextSettings(current => !current)}
+              aria-expanded={showContextSettings}
+              title="Show or hide expert and model settings"
+            >
+              {showContextSettings ? 'Collapse' : 'Expand'}
+            </button>
+            <button
+              type="button"
+              className="library-settings-button"
               onClick={() => setShowLibraryManager(current => !current)}
               aria-expanded={showLibraryManager}
               title="Manage expert libraries"
@@ -268,19 +285,61 @@ function InputArea({
             </button>
           </div>
         </div>
-        <div className="context-library-list">
-          {collectionOptions.map(collection => (
-            <label key={collection.name} className="context-library-option">
-              <input
-                type="checkbox"
-                checked={selectedContextCollections.includes(collection.name)}
-                onChange={(event) => handleContextCollectionToggle(collection.name, event.target.checked)}
-                disabled={!useWeaviateContext || collectionLoading}
-              />
-              <span>{collection.name}</span>
-            </label>
-          ))}
-        </div>
+        {showContextSettings && (
+          <>
+            <div className="context-library-list">
+              {collectionOptions.map(collection => (
+                <label key={collection.name} className="context-library-option">
+                  <input
+                    type="checkbox"
+                    checked={selectedContextCollections.includes(collection.name)}
+                    onChange={(event) => handleContextCollectionToggle(collection.name, event.target.checked)}
+                    disabled={!useWeaviateContext || collectionLoading}
+                  />
+                  <span>{collection.name}</span>
+                </label>
+              ))}
+            </div>
+            <div className="model-settings">
+              <label className="model-setting">
+                <span>Temperature</span>
+                <input
+                  type="number"
+                  min="0"
+                  max="1"
+                  step="0.05"
+                  value={temperature}
+                  onChange={(event) => setTemperature(Number(event.target.value))}
+                  disabled={disabled || loading || uploadLoading}
+                />
+              </label>
+              <label className="model-setting">
+                <span>Top P</span>
+                <input
+                  type="number"
+                  min="0.05"
+                  max="1"
+                  step="0.05"
+                  value={topP}
+                  onChange={(event) => setTopP(Number(event.target.value))}
+                  disabled={disabled || loading || uploadLoading}
+                />
+              </label>
+              <label className="model-setting">
+                <span>Context chars</span>
+                <input
+                  type="number"
+                  min="1000"
+                  max="64000"
+                  step="1000"
+                  value={contextChars}
+                  onChange={(event) => setContextChars(Number(event.target.value))}
+                  disabled={disabled || loading || uploadLoading || !useWeaviateContext}
+                />
+              </label>
+            </div>
+          </>
+        )}
       </div>
       {showLibraryManager && (
         <div className="library-modal-backdrop" role="presentation">

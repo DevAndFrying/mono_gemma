@@ -249,12 +249,20 @@
   border-radius: 0.5rem;
 }
 
+.context-library.collapsed {
+  padding: 0.45rem 0.75rem;
+}
+
 .context-library-header {
   display: flex;
   align-items: center;
   justify-content: space-between;
   gap: 0.75rem;
   margin-bottom: 0.625rem;
+}
+
+.context-library.collapsed .context-library-header {
+  margin-bottom: 0;
 }
 
 .context-library-actions {
@@ -289,6 +297,46 @@
   display: flex;
   flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.model-settings {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.75rem;
+  margin-top: 0.75rem;
+  padding-top: 0.75rem;
+  border-top: 1px solid var(--color-surface-light);
+}
+
+.model-setting {
+  display: flex;
+  align-items: center;
+  gap: 0.5rem;
+  color: var(--color-text-muted);
+  font-size: 0.8125rem;
+}
+
+.model-setting input {
+  width: 96px;
+  height: 30px;
+  padding: 0 0.5rem;
+  background-color: var(--color-surface);
+  color: var(--color-text);
+  border: 1px solid var(--color-surface-light);
+  border-radius: 0.5rem;
+  font-family: inherit;
+  font-size: 0.8125rem;
+}
+
+.model-setting input:focus {
+  outline: none;
+  border-color: var(--color-primary);
+  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
+}
+
+.model-setting input:disabled {
+  color: var(--color-text-muted);
+  cursor: not-allowed;
 }
 
 .context-library-option {

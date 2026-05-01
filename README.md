@@ -264,6 +264,7 @@ They do not open arbitrary local filesystem paths directly, because browsers blo
 ## Chat Features
 
 - **Stop** closes the active WebSocket stream, marks the partial answer complete, and reconnects for the next message.
+- **Temperature**, **Top P**, and **Context chars** tune generation and retrieved-context budget per message.
 - **Save chat** stores the current chat in browser `localStorage`.
 - **Saved chats** loads a previously saved local chat.
 - **Rename chat** renames the selected saved chat.

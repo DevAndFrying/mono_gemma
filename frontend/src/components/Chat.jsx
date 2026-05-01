@@ -607,7 +607,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     showChatStatus(`Exported ${format.toUpperCase()}.`);
   };
 
-  const handleSendMessage = async (text, classNames, useWeaviateContext = true) => {
+  const handleSendMessage = async (text, classNames, useWeaviateContext = true, generationOptions = {}) => {
     if (!text.trim() || !connected || !wsConnected) {
       if (!wsConnected) {
         console.warn('WebSocket not connected yet. Try again in a moment.');
@@ -656,6 +656,9 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
             classNames: Array.isArray(classNames) ? classNames : [classNames].filter(Boolean),
             model: selectedModel,
             useWeaviateContext,
+            temperature: generationOptions.temperature,
+            top_p: generationOptions.top_p,
+            contextChars: generationOptions.contextChars,
           },
         })
       );

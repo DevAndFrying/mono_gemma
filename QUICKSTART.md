@@ -109,6 +109,7 @@ Controls:
 
 - **Stop** interrupts the current streamed response.
 - **Use Weaviate context** toggles RAG context.
+- **Temperature**, **Top P**, and **Context chars** adjust model generation and retrieved-context budget. Lower generation values are more consistent.
 - **Save chat** saves the current chat in browser storage.
 - **Saved chats** loads a saved chat.
 - **Export MD** exports a Markdown transcript.
