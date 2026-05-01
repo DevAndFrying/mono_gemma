@@ -61,6 +61,8 @@ npm run dev
 Docker:
 
 - http://localhost:3000
+- Weaviate: http://localhost:8080
+- PostgreSQL with pgvector: localhost:5432
 
 Local dev:
 
@@ -86,16 +88,18 @@ The model selector lists installed models plus configured suggestions. If you se
 
 ## 6. Upload Files For RAG
 
-Use **Upload files** for PDFs and selected text/code files.
+Use **Upload files** for PDFs, PowerPoint `.pptx` files, and selected text/code files.
 
 Use **Upload repo** to upload a full folder or repository.
+
+Use **Manage** to open the expert library modal, view files in each library, add files or repos, and delete individual files.
 
 Repo uploads:
 
 - Preserve relative paths as `filePath`.
 - Skip `.git`, `node_modules`, `dist`, `build`, `coverage`, virtualenvs, cache folders, binaries, and large files.
 - Skip duplicates already in Weaviate with the same `filePath`.
-- Store documents in the default `UploadedFile` collection.
+- Store documents in the default `uploaded_files` collection.
 
 ## 7. Ask Questions
 
@@ -105,6 +109,7 @@ Controls:
 
 - **Stop** interrupts the current streamed response.
 - **Use Weaviate context** toggles RAG context.
+- **Temperature**, **Top P**, and **Context chars** adjust model generation and retrieved-context budget. Lower generation values are more consistent.
 - **Save chat** saves the current chat in browser storage.
 - **Saved chats** loads a saved chat.
 - **Export MD** exports a Markdown transcript.
@@ -158,6 +163,13 @@ Check Weaviate:
 curl http://localhost:8080/v1/schema
 ```
 
+Check PostgreSQL and pgvector:
+
+```bash
+docker exec -it mcp-postgres pg_isready -U mcp -d mcp_gemma
+docker exec -it mcp-postgres psql -U mcp -d mcp_gemma -c "SELECT extname, extversion FROM pg_extension WHERE extname = 'vector';"
+```
+
 ## 10. Reset Weaviate
 
 Drop all uploaded documents/vectors:
@@ -166,6 +178,19 @@ Drop all uploaded documents/vectors:
 docker compose down
 docker volume ls | grep weaviate
 docker volume rm mono_gemma_weaviate_data
+./docker-start.sh
+```
+
+If the volume name differs, use the name printed by `docker volume ls`.
+
+## 11. Reset PostgreSQL
+
+Drop the PostgreSQL data volume:
+
+```bash
+docker compose down
+docker volume ls | grep postgres
+docker volume rm mono_gemma_postgres_data
 ./docker-start.sh
 ```
 

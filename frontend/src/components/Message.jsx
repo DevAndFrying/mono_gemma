@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import './Message.css';
 
 const normalizeProseSpacing = (text) => (
@@ -133,9 +133,42 @@ const renderFormattedContent = (text) => {
   return blocks;
 };
 
-function Message({ role, content, thinking, showLoading, sources = [] }) {
+function Message({ role, content, thinking, showLoading, sources = [], collapseSourcesSignal = 0 }) {
   const [showThinking, setShowThinking] = useState(false);
+  const [showSources, setShowSources] = useState(false);
+  const closeSourcesTimeoutRef = useRef(null);
   const avatarText = role === 'user' ? 'You' : role === 'error' ? '!' : 'AI';
+
+  const clearCloseSourcesTimeout = () => {
+    if (closeSourcesTimeoutRef.current) {
+      window.clearTimeout(closeSourcesTimeoutRef.current);
+      closeSourcesTimeoutRef.current = null;
+    }
+  };
+
+  const openSources = () => {
+    clearCloseSourcesTimeout();
+    setShowSources(true);
+  };
+
+  const scheduleCloseSources = () => {
+    clearCloseSourcesTimeout();
+    closeSourcesTimeoutRef.current = window.setTimeout(() => {
+      setShowSources(false);
+      closeSourcesTimeoutRef.current = null;
+    }, 3000);
+  };
+
+  const closeSources = () => {
+    clearCloseSourcesTimeout();
+    setShowSources(false);
+  };
+
+  useEffect(() => () => clearCloseSourcesTimeout(), []);
+
+  useEffect(() => {
+    closeSources();
+  }, [collapseSourcesSignal]);
 
   return (
     <div className={`message message-${role}`}>
@@ -170,29 +203,48 @@ function Message({ role, content, thinking, showLoading, sources = [] }) {
           </div>
         )}
         {role === 'assistant' && sources.length > 0 && (
-          <div className="message-sources">
-            <div className="message-sources-title">RAG sources</div>
-            <div className="message-source-list">
-              {sources.map((source) => {
-                const SourceTag = source.sourceUrl ? 'a' : 'div';
-                return (
-                  <SourceTag
-                    key={`${source.index}-${source.id || source.filePath}`}
-                    className="message-source"
-                    href={source.sourceUrl}
-                    target={source.sourceUrl ? '_blank' : undefined}
-                    rel={source.sourceUrl ? 'noreferrer' : undefined}
-                    title={source.filePath || source.fileName}
-                  >
-                    <span className="message-source-index">[{source.index}]</span>
-                    <span className="message-source-name">{source.filePath || source.fileName || 'Source'}</span>
-                    {typeof source.certainty === 'number' && (
-                      <span className="message-source-score">{source.certainty.toFixed(2)}</span>
-                    )}
-                  </SourceTag>
-                );
-              })}
+          <div
+            className={`message-sources ${showSources ? 'message-sources-open' : ''}`}
+            onMouseEnter={openSources}
+            onMouseLeave={scheduleCloseSources}
+            onFocus={openSources}
+            onBlur={(event) => {
+              if (!event.currentTarget.contains(event.relatedTarget)) {
+                closeSources();
+              }
+            }}
+            onClick={(event) => event.stopPropagation()}
+            tabIndex={0}
+            role="button"
+            aria-expanded={showSources}
+          >
+            <div className="message-sources-title">
+              <span>RAG sources</span>
+              <span className="message-sources-count">{sources.length}</span>
             </div>
+            {showSources && (
+              <div className="message-source-list">
+                {sources.map((source) => {
+                  const SourceTag = source.sourceUrl ? 'a' : 'div';
+                  return (
+                    <SourceTag
+                      key={`${source.index}-${source.id || source.filePath}`}
+                      className="message-source"
+                      href={source.sourceUrl}
+                      target={source.sourceUrl ? '_blank' : undefined}
+                      rel={source.sourceUrl ? 'noreferrer' : undefined}
+                      title={source.filePath || source.fileName}
+                    >
+                      <span className="message-source-index">[{source.index}]</span>
+                      <span className="message-source-name">{source.filePath || source.fileName || 'Source'}</span>
+                      {typeof source.certainty === 'number' && (
+                        <span className="message-source-score">{source.certainty.toFixed(2)}</span>
+                      )}
+                    </SourceTag>
+                  );
+                })}
+              </div>
+            )}
           </div>
         )}
         {!content && !showLoading && role === 'assistant' && (

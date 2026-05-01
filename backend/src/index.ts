@@ -25,8 +25,8 @@ const MODEL_NAME = process.env.MODEL_NAME || 'gemma3:4b';
 const API_PORT = process.env.API_PORT || 3000;
 const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
-const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'UploadedFile';
-const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 2 * 1024 * 1024);
+const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'uploaded_files';
+const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 20 * 1024 * 1024);
 const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 8);
 const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 16000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
@@ -59,6 +59,7 @@ type UploadedFilePayload = {
 
 type WeaviateContextItem = {
   id?: string;
+  className: string;
   content: string;
   fileName?: string;
   filePath?: string;
@@ -241,11 +242,46 @@ const ensureFileCollectionProperties = async (className: string) => {
 
 const normalizeWeaviateClassName = (className?: string) => {
   const trimmed = (className || DEFAULT_WEAVIATE_FILE_CLASS).trim();
-  if (!/^[A-Z][A-Za-z0-9_]*$/.test(trimmed)) {
-    throw new Error('Collection name must start with an uppercase letter and contain only letters, numbers, or underscores.');
+  if (!/^[A-Za-z][A-Za-z0-9_]*$/.test(trimmed)) {
+    throw new Error('Collection name must start with a letter and contain only letters, numbers, or underscores.');
   }
   return trimmed;
 };
+
+const normalizeWeaviateClassNames = (classNames?: unknown, fallbackClassName?: string) => {
+  const hasExplicitList = Array.isArray(classNames);
+  const names = Array.isArray(classNames)
+    ? classNames
+    : (typeof fallbackClassName === 'string' && fallbackClassName.trim() ? [fallbackClassName] : []);
+
+  const normalized = names
+    .filter((name): name is string => typeof name === 'string' && !!name.trim())
+    .map((name) => normalizeWeaviateClassName(name));
+
+  if (normalized.length > 0) {
+    return Array.from(new Set(normalized));
+  }
+
+  return hasExplicitList ? [] : [normalizeWeaviateClassName()];
+};
+
+const clampNumber = (value: unknown, fallback: number, min: number, max: number) => {
+  const parsed = typeof value === 'number' ? value : Number(value);
+  if (!Number.isFinite(parsed)) {
+    return fallback;
+  }
+  return Math.min(max, Math.max(min, parsed));
+};
+
+const normalizeGenerationOptions = (options: { temperature?: unknown; top_p?: unknown } = {}) => ({
+  temperature: clampNumber(options.temperature, 0.2, 0, 1),
+  top_p: clampNumber(options.top_p, 0.85, 0.05, 1),
+});
+
+const normalizeContextOptions = (options: { contextChars?: unknown; contextResults?: unknown } = {}) => ({
+  contextChars: Math.round(clampNumber(options.contextChars, WEAVIATE_CONTEXT_CHARS, 1000, 64000)),
+  contextResults: Math.round(clampNumber(options.contextResults, WEAVIATE_CONTEXT_RESULTS, 1, 30)),
+});
 
 const ensureFileCollection = async (className: string) => {
   const exists = await weaviateClient.schema.exists(className);
@@ -313,7 +349,7 @@ const truncateText = (text: string, maxLength: number) => {
   return `${text.slice(0, maxLength - 3)}...`;
 };
 
-const searchWeaviateContext = async (query: string, className: string): Promise<WeaviateContextItem[]> => {
+const searchWeaviateContext = async (query: string, className: string, limit: number): Promise<WeaviateContextItem[]> => {
   try {
     const exists = await weaviateClient.schema.exists(className);
     if (!exists) {
@@ -326,7 +362,7 @@ const searchWeaviateContext = async (query: string, className: string): Promise<
       .withClassName(className)
       .withFields('content fileName filePath _additional { id certainty }')
       .withNearText({ concepts: [query] })
-      .withLimit(WEAVIATE_CONTEXT_RESULTS)
+      .withLimit(limit)
       .do();
 
     const matches = result?.data?.Get?.[className] || [];
@@ -334,6 +370,7 @@ const searchWeaviateContext = async (query: string, className: string): Promise<
       .filter((item: any) => typeof item.content === 'string' && item.content.trim())
       .map((item: any) => ({
         id: item._additional?.id,
+        className,
         content: item.content.trim(),
         fileName: item.filePath || item.fileName,
         filePath: item.filePath,
@@ -348,31 +385,48 @@ const searchWeaviateContext = async (query: string, className: string): Promise<
   }
 };
 
-const buildPromptWithWeaviateContext = async (message: string, className?: string, useWeaviateContext = true) => {
+const searchWeaviateContexts = async (query: string, classNames: string[], limit: number) => {
+  const perClassLimit = Math.max(1, limit);
+  const resultsByClass = await Promise.all(classNames.map((className) => searchWeaviateContext(query, className, perClassLimit)));
+  return resultsByClass
+    .flat()
+    .sort((left, right) => (right.certainty || 0) - (left.certainty || 0))
+    .slice(0, limit);
+};
+
+const buildPromptWithWeaviateContext = async (
+  message: string,
+  classNames?: unknown,
+  useWeaviateContext = true,
+  fallbackClassName?: string,
+  contextOptions = normalizeContextOptions(),
+) => {
+  const normalizedClassNames = normalizeWeaviateClassNames(classNames, fallbackClassName);
+
   if (!useWeaviateContext) {
     return {
       prompt: message,
-      className: className || DEFAULT_WEAVIATE_FILE_CLASS,
+      classNames: normalizedClassNames,
       contextCount: 0,
       contextItems: [],
     };
   }
 
-  const normalizedClassName = normalizeWeaviateClassName(className);
-  const contextItems = await searchWeaviateContext(message, normalizedClassName);
+  const contextItems = await searchWeaviateContexts(message, normalizedClassNames, contextOptions.contextResults);
 
   if (contextItems.length === 0) {
     return {
       prompt: message,
-      className: normalizedClassName,
+      classNames: normalizedClassNames,
       contextCount: 0,
       contextItems: [],
     };
   }
 
-  const charsPerItem = Math.max(500, Math.floor(WEAVIATE_CONTEXT_CHARS / contextItems.length));
+  const charsPerItem = Math.max(500, Math.floor(contextOptions.contextChars / contextItems.length));
   const contextBlock = contextItems.map((item, index) => {
-    const source = item.fileName ? `Source: ${item.fileName}` : `Source ${index + 1}`;
+    const sourceName = item.fileName ? `${item.className}/${item.fileName}` : item.className;
+    const source = `Source: ${sourceName}`;
     const score = typeof item.certainty === 'number' ? `, certainty ${item.certainty.toFixed(3)}` : '';
     const link = item.sourceUrl ? `\nLink: ${item.sourceUrl}` : '';
     return `[${index + 1}] ${source}${score}${link}\n${truncateText(item.content, charsPerItem)}`;
@@ -390,7 +444,7 @@ const buildPromptWithWeaviateContext = async (message: string, className?: strin
       'User request:',
       message,
     ].join('\n'),
-    className: normalizedClassName,
+    classNames: normalizedClassNames,
     contextCount: contextItems.length,
     contextItems,
   };
@@ -414,17 +468,19 @@ wss.on('connection', (ws: any, req: any) => {
       console.log('   Type:', type);
 
       if (type === 'message') {
-        const { text, className, model, useWeaviateContext = true } = payload;
+        const { text, className, classNames, model, useWeaviateContext = true } = payload;
+        const generationOptions = normalizeGenerationOptions(payload);
+        const contextOptions = normalizeContextOptions(payload);
         console.log('👤 User message:', text);
 
         try {
           const resolvedModel = await resolveOllamaModel(model);
           const {
             prompt,
-            className: contextClassName,
+            classNames: contextClassNames,
             contextCount,
             contextItems,
-          } = await buildPromptWithWeaviateContext(text, className, useWeaviateContext);
+          } = await buildPromptWithWeaviateContext(text, classNames, useWeaviateContext, className, contextOptions);
 
           // Stream response from Ollama with timeout
           console.log('🔵 Sending request to Ollama...');
@@ -433,7 +489,7 @@ wss.on('connection', (ws: any, req: any) => {
             console.log(`   Fallback from requested model: ${resolvedModel.requestedModel || 'none'}`);
           }
           console.log('   Prompt:', prompt.substring(0, 50));
-          console.log(`   Weaviate context: ${contextCount} result(s) from ${contextClassName}`);
+          console.log(`   Weaviate context: ${contextCount} result(s) from ${contextClassNames.join(', ')}`);
           
           const response = await axios.post(
             `${OLLAMA_BASE_URL}/api/generate`,
@@ -442,8 +498,8 @@ wss.on('connection', (ws: any, req: any) => {
               prompt,
               stream: true,
               keep_alive: OLLAMA_KEEP_ALIVE,
-              temperature: 0.7,
-              top_p: 0.9,
+              temperature: generationOptions.temperature,
+              top_p: generationOptions.top_p,
             },
             { 
               responseType: 'stream',
@@ -466,11 +522,13 @@ wss.on('connection', (ws: any, req: any) => {
             ws.send(JSON.stringify({
               type: 'context',
               payload: {
-                className: contextClassName,
+                className: contextClassNames[0],
+                classNames: contextClassNames,
                 count: contextCount,
                 sources: contextItems.map((item, index) => ({
                   index: index + 1,
                   id: item.id,
+                  className: item.className,
                   fileName: item.fileName,
                   filePath: item.filePath || item.fileName,
                   certainty: item.certainty,
@@ -600,6 +658,74 @@ app.get('/api/weaviate/health', async (req, res) => {
   }
 });
 
+app.get('/api/weaviate/collections', async (req, res) => {
+  try {
+    const schema = await weaviateClient.schema.getter().do();
+    const collections = (schema.classes || [])
+      .filter((cls: any) => Array.isArray(cls.properties) && cls.properties.some((property: any) => property.name === 'content'))
+      .map((cls: any) => ({
+        name: cls.class,
+        description: cls.description,
+        vectorizer: cls.vectorizer,
+      }))
+      .sort((left: any, right: any) => left.name.localeCompare(right.name));
+
+    res.json({
+      defaultCollection: DEFAULT_WEAVIATE_FILE_CLASS,
+      collections,
+    });
+  } catch (error) {
+    console.error('Weaviate collection list error:', errorMessage(error));
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(500).json({ error: errorMessage(error) });
+  }
+});
+
+app.post('/api/weaviate/collections', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.body?.className);
+    await ensureFileCollection(className);
+    res.json({
+      collection: {
+        name: className,
+        description: 'Files uploaded from the frontend',
+        vectorizer: 'text2vec-transformers',
+      },
+    });
+  } catch (error) {
+    console.error('Weaviate collection create error:', errorMessage(error));
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
+app.delete('/api/weaviate/collections/:className', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.params.className);
+    const exists = await weaviateClient.schema.exists(className);
+    if (!exists) {
+      res.status(404).json({ error: `Weaviate library "${className}" does not exist.` });
+      return;
+    }
+
+    await weaviateClient.schema.classDeleter().withClassName(className).do();
+    res.json({ deleted: className });
+  } catch (error) {
+    console.error('Weaviate collection delete error:', errorMessage(error));
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
 app.get('/api/weaviate/source/:className/:id', async (req, res) => {
   try {
     const className = normalizeWeaviateClassName(req.params.className);
@@ -629,34 +755,103 @@ app.get('/api/weaviate/source/:className/:id', async (req, res) => {
   }
 });
 
+app.get('/api/weaviate/collections/:className/files', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.params.className);
+    const exists = await weaviateClient.schema.exists(className);
+    if (!exists) {
+      res.status(404).json({ error: `Weaviate library "${className}" does not exist.` });
+      return;
+    }
+
+    const result = await weaviateClient.graphql
+      .get()
+      .withClassName(className)
+      .withFields('fileName filePath mimeType size uploadedAt _additional { id }')
+      .withLimit(1000)
+      .do();
+
+    const files = (result?.data?.Get?.[className] || [])
+      .map((file: any) => ({
+        id: file._additional?.id,
+        fileName: file.fileName,
+        filePath: file.filePath || file.fileName,
+        mimeType: file.mimeType,
+        size: file.size,
+        uploadedAt: file.uploadedAt,
+      }))
+      .filter((file: any) => typeof file.id === 'string')
+      .sort((left: any, right: any) => (left.filePath || '').localeCompare(right.filePath || ''));
+
+    res.json({ className, files, count: files.length });
+  } catch (error) {
+    console.error('Weaviate file list error:', errorMessage(error));
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
+app.delete('/api/weaviate/collections/:className/files/:id', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.params.className);
+    const id = req.params.id;
+    if (!/^[A-Za-z0-9-]+$/.test(id)) {
+      res.status(400).json({ error: 'Invalid file id.' });
+      return;
+    }
+
+    await weaviateClient.data
+      .deleter()
+      .withClassName(className)
+      .withId(id)
+      .do();
+
+    res.json({ deleted: id, className });
+  } catch (error) {
+    console.error('Weaviate file delete error:', errorMessage(error));
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
 app.post('/api/chat', async (req, res) => {
   try {
-    const { message, className, model, useWeaviateContext = true } = req.body;
+    const { message, className, classNames, model, useWeaviateContext = true } = req.body;
+    const generationOptions = normalizeGenerationOptions(req.body);
+    const contextOptions = normalizeContextOptions(req.body);
     const resolvedModel = await resolveOllamaModel(model);
     const {
       prompt,
-      className: contextClassName,
+      classNames: contextClassNames,
       contextCount,
       contextItems,
-    } = await buildPromptWithWeaviateContext(message, className, useWeaviateContext);
+    } = await buildPromptWithWeaviateContext(message, classNames, useWeaviateContext, className, contextOptions);
     
     const response = await axios.post(`${OLLAMA_BASE_URL}/api/generate`, {
       model: resolvedModel.model,
       prompt,
       stream: false,
       keep_alive: OLLAMA_KEEP_ALIVE,
-      temperature: 0.7,
-      top_p: 0.9,
+      temperature: generationOptions.temperature,
+      top_p: generationOptions.top_p,
     });
 
     res.json({
       response: response.data.response,
       weaviate: {
-        className: contextClassName,
+        className: contextClassNames[0],
+        classNames: contextClassNames,
         contextCount,
         sources: contextItems.map((item, index) => ({
           index: index + 1,
           id: item.id,
+          className: item.className,
           fileName: item.fileName,
           filePath: item.filePath || item.fileName,
           certainty: item.certainty,
@@ -972,6 +1167,22 @@ app.use((err: Error, req: Request, res: Response, next: NextFunction) => {
   console.error('Error:', err);
   res.status(500).json({ error: 'Internal server error' });
 });
+
+const handleServerListenError = (error: NodeJS.ErrnoException) => {
+  if (error.code === 'EADDRINUSE') {
+    console.error(`❌ Backend failed to start: port ${API_PORT} is already in use.`);
+    console.error('   Stop the process using that port or set API_PORT to a free port and update VITE_BACKEND_URL/VITE_WS_URL.');
+  } else if (error.code === 'EACCES' || error.code === 'EPERM') {
+    console.error(`❌ Backend failed to start: permission denied while binding to port ${API_PORT}.`);
+    console.error('   Use an allowed port or update API_PORT in backend/.env.');
+  } else {
+    console.error('❌ Backend failed to start:', error);
+  }
+  process.exit(1);
+};
+
+server.on('error', handleServerListenError);
+wss.on('error', handleServerListenError);
 
 // Start server
 server.listen(API_PORT, () => {

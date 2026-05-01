@@ -1,4 +1,24 @@
 services:
+  postgres:
+    image: pgvector/pgvector:pg16
+    container_name: mcp-postgres
+    ports:
+      - "5432:5432"
+    environment:
+      POSTGRES_DB: mcp_gemma
+      POSTGRES_USER: mcp
+      POSTGRES_PASSWORD: mcp_dev_password
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./docker/postgres/init:/docker-entrypoint-initdb.d:ro
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U mcp -d mcp_gemma"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+    networks:
+      - mcp-network
+
   ollama:
     image: ollama/ollama:latest
     container_name: mcp-ollama
@@ -34,7 +54,7 @@ services:
       ENABLE_MODULES: text2vec-transformers
       TRANSFORMERS_INFERENCE_API: http://t2v-transformers:8080
       MODULES_CLIENT_TIMEOUT: 180s
-      ASYNC_INDEXING: "true"
+      ASYNC_INDEXING: "false"
       CLUSTER_HOSTNAME: node1
     volumes:
       - weaviate_data:/var/lib/weaviate
@@ -67,7 +87,13 @@ services:
       - API_PORT=3000
       - MCP_PORT=3001
       - WEAVIATE_URL=http://weaviate:8080
-      - WEAVIATE_ENABLE_PQ=true
+      - DATABASE_URL=postgresql://mcp:mcp_dev_password@postgres:5432/mcp_gemma
+      - PGHOST=postgres
+      - PGPORT=5432
+      - PGDATABASE=mcp_gemma
+      - PGUSER=mcp
+      - PGPASSWORD=mcp_dev_password
+      - WEAVIATE_ENABLE_PQ=false
       - WEAVIATE_PQ_TRAINING_LIMIT=100000
       - WEAVIATE_CONTEXT_RESULTS=16
       - WEAVIATE_CONTEXT_CHARS=64000
@@ -75,8 +101,12 @@ services:
       - SUGGESTED_MODELS=gemma4:e4b,gemma4:26b,gemma4:31b
       - NODE_ENV=production
     depends_on:
-      - ollama
-      - weaviate
+      postgres:
+        condition: service_healthy
+      ollama:
+        condition: service_started
+      weaviate:
+        condition: service_started
     volumes:
       - ./backend/src:/app/backend/src
       - ./frontend/dist:/app/frontend/dist:ro
@@ -84,6 +114,7 @@ services:
       - mcp-network
 
 volumes:
+  postgres_data:
   ollama_data:
   weaviate_data:
 
