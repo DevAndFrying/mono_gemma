@@ -126,6 +126,20 @@ const loadStoredArray = (key, fallback = []) => {
   }
 };
 
+const readJsonResponse = async (response) => {
+  const text = await response.text();
+  if (!text) {
+    return {};
+  }
+
+  try {
+    return JSON.parse(text);
+  } catch {
+    const details = text.replace(/\s+/g, ' ').trim().slice(0, 180);
+    throw new Error(details || `Server returned a non-JSON response with status ${response.status}.`);
+  }
+};
+
 const downloadFile = (filename, content, type) => {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -209,7 +223,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     setCollectionLoading(true);
     try {
       const response = await fetch('/api/weaviate/collections');
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.error || 'Failed to load Weaviate collections');
       }
@@ -938,7 +952,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
           }),
         });
 
-        const data = await response.json();
+        const data = await readJsonResponse(response);
         if (!response.ok) {
           throw new Error(data.error || 'Upload failed');
         }
@@ -968,8 +982,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const handleCreateCollection = async (rawCollectionName) => {
     const className = rawCollectionName.trim();
     if (!className) {
-      showChatStatus('Enter a library name first.');
-      return false;
+      return { ok: false, message: 'Enter a library name first.' };
     }
 
     setCollectionLoading(true);
@@ -979,7 +992,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ className }),
       });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.error || 'Failed to create Weaviate library');
       }
@@ -994,11 +1007,9 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       setSelectedContextCollections(current => (
         current.includes(collection.name) ? current : [...current, collection.name]
       ));
-      showChatStatus(`Created ${collection.name}.`);
-      return true;
+      return { ok: true, collection, message: `Created ${collection.name}.` };
     } catch (error) {
-      showChatStatus(error.message);
-      return false;
+      return { ok: false, message: error.message };
     } finally {
       setCollectionLoading(false);
     }
@@ -1023,7 +1034,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       const response = await fetch(`/api/weaviate/collections/${encodeURIComponent(collectionName)}`, {
         method: 'DELETE',
       });
-      const data = await response.json();
+      const data = await readJsonResponse(response);
       if (!response.ok) {
         throw new Error(data.error || 'Failed to delete Weaviate library');
       }

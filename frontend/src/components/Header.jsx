@@ -1,7 +1,7 @@
 import React from 'react';
 import './Header.css';
 
-function Header({ connected, modelInfo, modelOptions, selectedModel, onModelChange, installedModels, weaviateInfo }) {
+function Header({ connected, modelOptions, selectedModel, onModelChange, installedModels, weaviateInfo }) {
   const weaviateReady = weaviateInfo?.status === 'ready';
   const installedModelSet = new Set(installedModels || []);
 
@@ -10,9 +10,6 @@ function Header({ connected, modelInfo, modelOptions, selectedModel, onModelChan
       <div className="header-content">
         <div className="header-title">
           <h1>MCP Gemma Chat</h1>
-          <p className="model-name">
-            Default: {modelInfo?.model || 'Loading...'}
-          </p>
         </div>
         <label className="model-picker" htmlFor="model-select">
           <span>Model</span>

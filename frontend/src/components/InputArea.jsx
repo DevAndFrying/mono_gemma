@@ -40,6 +40,10 @@ const SUPPORTED_UPLOAD_ACCEPT = [
   '.yml',
 ].join(',');
 
+const TEMPERATURE_BOUNDS = { min: 0, max: 1, maxLength: 4 };
+const TOP_P_BOUNDS = { min: 0.05, max: 1, maxLength: 4 };
+const CONTEXT_CHARS_BOUNDS = { min: 1000, max: 64000, maxLength: 5 };
+
 const formatFileSize = (size) => {
   if (typeof size !== 'number' || Number.isNaN(size)) {
     return 'Unknown size';
@@ -63,6 +67,54 @@ const formatUploadedAt = (uploadedAt) => {
   }
   const date = new Date(uploadedAt);
   return Number.isNaN(date.getTime()) ? 'Unknown date' : date.toLocaleString();
+};
+
+const clampNumber = (value, min, max) => Math.min(max, Math.max(min, value));
+
+const formatSettingNumber = (value) => String(Number(value.toFixed(2)));
+
+const sanitizeDecimalSettingInput = (value, { max, maxLength }) => {
+  let nextValue = value.replace(/[^\d.]/g, '');
+  const decimalIndex = nextValue.indexOf('.');
+  if (decimalIndex !== -1) {
+    nextValue = `${nextValue.slice(0, decimalIndex + 1)}${nextValue.slice(decimalIndex + 1).replace(/\./g, '')}`;
+  }
+  nextValue = nextValue.slice(0, maxLength);
+
+  if (nextValue === '' || nextValue === '.') {
+    return nextValue;
+  }
+
+  const numberValue = Number(nextValue);
+  return Number.isFinite(numberValue) && numberValue > max
+    ? formatSettingNumber(max)
+    : nextValue;
+};
+
+const normalizeDecimalSettingInput = (value, bounds) => {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) {
+    return formatSettingNumber(bounds.min);
+  }
+  return formatSettingNumber(clampNumber(numberValue, bounds.min, bounds.max));
+};
+
+const sanitizeIntegerSettingInput = (value, { max, maxLength }) => {
+  const nextValue = value.replace(/\D/g, '').slice(0, maxLength);
+  if (!nextValue) {
+    return nextValue;
+  }
+
+  const numberValue = Number(nextValue);
+  return Number.isFinite(numberValue) && numberValue > max ? String(max) : nextValue;
+};
+
+const normalizeIntegerSettingInput = (value, bounds) => {
+  const numberValue = Number(value);
+  if (!Number.isFinite(numberValue)) {
+    return String(bounds.min);
+  }
+  return String(Math.trunc(clampNumber(numberValue, bounds.min, bounds.max)));
 };
 
 const readJsonResponse = async (response) => {
@@ -99,13 +151,14 @@ function InputArea({
   const [input, setInput] = useState('');
   const [useWeaviateContext, setUseWeaviateContext] = useState(true);
   const [showContextSettings, setShowContextSettings] = useState(true);
-  const [temperature, setTemperature] = useState(0.2);
-  const [topP, setTopP] = useState(0.85);
-  const [contextChars, setContextChars] = useState(16000);
+  const [temperature, setTemperature] = useState('0.2');
+  const [topP, setTopP] = useState('0.85');
+  const [contextChars, setContextChars] = useState('16000');
   const [newCollectionName, setNewCollectionName] = useState('');
   const [showLibraryManager, setShowLibraryManager] = useState(false);
   const [selectedDeleteCollection, setSelectedDeleteCollection] = useState('');
   const [selectedManageCollection, setSelectedManageCollection] = useState(selectedUploadCollection || 'uploaded_files');
+  const [createCollectionStatus, setCreateCollectionStatus] = useState(null);
   const [libraryFiles, setLibraryFiles] = useState([]);
   const [libraryFilesLoading, setLibraryFilesLoading] = useState(false);
   const [libraryFilesError, setLibraryFilesError] = useState('');
@@ -116,10 +169,18 @@ function InputArea({
   const handleSubmit = (e) => {
     e.preventDefault();
     if (input.trim() && !disabled) {
+      const normalizedTemperature = normalizeDecimalSettingInput(temperature, TEMPERATURE_BOUNDS);
+      const normalizedTopP = normalizeDecimalSettingInput(topP, TOP_P_BOUNDS);
+      const normalizedContextChars = normalizeIntegerSettingInput(contextChars, CONTEXT_CHARS_BOUNDS);
+
+      setTemperature(normalizedTemperature);
+      setTopP(normalizedTopP);
+      setContextChars(normalizedContextChars);
+
       onSendMessage(input, selectedContextCollections, useWeaviateContext, {
-        temperature,
-        top_p: topP,
-        contextChars,
+        temperature: Number(normalizedTemperature),
+        top_p: Number(normalizedTopP),
+        contextChars: Number(normalizedContextChars),
       });
       setInput('');
     }
@@ -134,11 +195,16 @@ function InputArea({
 
   const handleCreateCollection = async () => {
     const collectionName = newCollectionName.trim();
-    const created = await onCreateCollection(newCollectionName);
-    if (created) {
+    setCreateCollectionStatus(null);
+    const result = await onCreateCollection(newCollectionName);
+    if (result?.ok) {
       setNewCollectionName('');
-      setSelectedManageCollection(collectionName);
+      setSelectedManageCollection(result.collection?.name || collectionName);
+      setCreateCollectionStatus({ type: 'success', message: result.message || `Created ${result.collection?.name || collectionName}.` });
+      return;
     }
+
+    setCreateCollectionStatus({ type: 'error', message: result?.message || 'Failed to create Weaviate library.' });
   };
 
   const handleDeleteCollection = () => {
@@ -210,6 +276,18 @@ function InputArea({
       ? Array.from(new Set([...selectedContextCollections, collectionName]))
       : selectedContextCollections.filter(name => name !== collectionName);
     onContextCollectionsChange(nextCollections);
+  };
+
+  const handleTemperatureChange = (event) => {
+    setTemperature(sanitizeDecimalSettingInput(event.target.value, TEMPERATURE_BOUNDS));
+  };
+
+  const handleTopPChange = (event) => {
+    setTopP(sanitizeDecimalSettingInput(event.target.value, TOP_P_BOUNDS));
+  };
+
+  const handleContextCharsChange = (event) => {
+    setContextChars(sanitizeIntegerSettingInput(event.target.value, CONTEXT_CHARS_BOUNDS));
   };
 
   const collectionOptions = Array.from(
@@ -304,36 +382,36 @@ function InputArea({
               <label className="model-setting">
                 <span>Temperature</span>
                 <input
-                  type="number"
-                  min="0"
-                  max="1"
-                  step="0.05"
+                  type="text"
+                  inputMode="decimal"
+                  maxLength={TEMPERATURE_BOUNDS.maxLength}
                   value={temperature}
-                  onChange={(event) => setTemperature(Number(event.target.value))}
+                  onChange={handleTemperatureChange}
+                  onBlur={() => setTemperature(normalizeDecimalSettingInput(temperature, TEMPERATURE_BOUNDS))}
                   disabled={disabled || loading || uploadLoading}
                 />
               </label>
               <label className="model-setting">
                 <span>Top P</span>
                 <input
-                  type="number"
-                  min="0.05"
-                  max="1"
-                  step="0.05"
+                  type="text"
+                  inputMode="decimal"
+                  maxLength={TOP_P_BOUNDS.maxLength}
                   value={topP}
-                  onChange={(event) => setTopP(Number(event.target.value))}
+                  onChange={handleTopPChange}
+                  onBlur={() => setTopP(normalizeDecimalSettingInput(topP, TOP_P_BOUNDS))}
                   disabled={disabled || loading || uploadLoading}
                 />
               </label>
               <label className="model-setting">
                 <span>Context chars</span>
                 <input
-                  type="number"
-                  min="1000"
-                  max="64000"
-                  step="1000"
+                  type="text"
+                  inputMode="numeric"
+                  maxLength={CONTEXT_CHARS_BOUNDS.maxLength}
                   value={contextChars}
-                  onChange={(event) => setContextChars(Number(event.target.value))}
+                  onChange={handleContextCharsChange}
+                  onBlur={() => setContextChars(normalizeIntegerSettingInput(contextChars, CONTEXT_CHARS_BOUNDS))}
                   disabled={disabled || loading || uploadLoading || !useWeaviateContext}
                 />
               </label>
@@ -473,7 +551,10 @@ function InputArea({
                     id="new-collection-name"
                     type="text"
                     value={newCollectionName}
-                    onChange={(event) => setNewCollectionName(event.target.value)}
+                    onChange={(event) => {
+                      setNewCollectionName(event.target.value);
+                      setCreateCollectionStatus(null);
+                    }}
                     placeholder="NewExpertLibrary"
                     disabled={uploadDisabled || uploadLoading || collectionLoading}
                   />
@@ -487,6 +568,11 @@ function InputArea({
                 >
                   Create library
                 </button>
+                {createCollectionStatus && (
+                  <span className={`library-create-status ${createCollectionStatus.type}`} role="status">
+                    {createCollectionStatus.message}
+                  </span>
+                )}
               </div>
               <div className="library-delete">
                 <label className="library-field" htmlFor="delete-collection-select">

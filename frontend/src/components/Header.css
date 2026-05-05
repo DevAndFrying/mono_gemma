@@ -18,11 +18,6 @@
   margin-bottom: 0.125rem;
 }
 
-.model-name {
-  font-size: 0.75rem;
-  color: var(--color-text-muted);
-}
-
 .header-status {
   display: flex;
   align-items: center;
