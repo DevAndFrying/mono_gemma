@@ -31,6 +31,10 @@ const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 
 const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 16000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
 const WEAVIATE_PQ_TRAINING_LIMIT = Number(process.env.WEAVIATE_PQ_TRAINING_LIMIT || 50000);
+const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 1500);
+const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 250);
+const WEAVIATE_HYBRID_ALPHA = Number(process.env.WEAVIATE_HYBRID_ALPHA || 0.35);
+const WEAVIATE_RERANK_CANDIDATE_MULTIPLIER = Number(process.env.WEAVIATE_RERANK_CANDIDATE_MULTIPLIER || 5);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
 const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma3:4b,gemma3:12b,gemma3:27b')
@@ -64,6 +68,11 @@ type WeaviateContextItem = {
   fileName?: string;
   filePath?: string;
   certainty?: number;
+  score?: number;
+  scoreLabel?: string;
+  rerankScore?: number;
+  chunkIndex?: number;
+  chunkCount?: number;
   sourceUrl?: string;
 };
 
@@ -210,6 +219,21 @@ const fileCollectionProperties = () => [
     description: 'Relative file path for folder or repository uploads',
   },
   {
+    name: 'fileId',
+    dataType: ['text'],
+    description: 'Stable identifier shared by all chunks from the same uploaded file',
+  },
+  {
+    name: 'chunkIndex',
+    dataType: ['int'],
+    description: 'Zero-based index of this chunk within the uploaded file',
+  },
+  {
+    name: 'chunkCount',
+    dataType: ['int'],
+    description: 'Total number of chunks produced from the uploaded file',
+  },
+  {
     name: 'mimeType',
     dataType: ['text'],
     description: 'Uploaded file MIME type',
@@ -342,11 +366,216 @@ const findExistingFileByPath = async (className: string, filePath: string) => {
   return result?.data?.Get?.[className]?.[0] || null;
 };
 
+const createFileId = (filePath: string) => Buffer.from(filePath).toString('base64url').slice(0, 96);
+
+const splitContentIntoChunks = (content: string) => {
+  const normalizedChunkChars = Math.max(1000, WEAVIATE_UPLOAD_CHUNK_CHARS);
+  const normalizedOverlapChars = Math.min(
+    Math.max(0, WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS),
+    Math.floor(normalizedChunkChars / 2),
+  );
+
+  if (content.length <= normalizedChunkChars) {
+    return [content.trim()];
+  }
+
+  const chunks: string[] = [];
+  let start = 0;
+  while (start < content.length) {
+    const hardEnd = Math.min(content.length, start + normalizedChunkChars);
+    let end = hardEnd;
+    if (hardEnd < content.length) {
+      const breakWindowStart = Math.max(start + Math.floor(normalizedChunkChars * 0.6), hardEnd - 600);
+      const breakWindow = content.slice(breakWindowStart, hardEnd);
+      const paragraphBreak = breakWindow.lastIndexOf('\n\n');
+      const lineBreak = breakWindow.lastIndexOf('\n');
+      const sentenceBreak = Math.max(
+        breakWindow.lastIndexOf('. '),
+        breakWindow.lastIndexOf('? '),
+        breakWindow.lastIndexOf('! '),
+      );
+      const bestBreak = Math.max(paragraphBreak, lineBreak, sentenceBreak);
+      if (bestBreak > 0) {
+        end = breakWindowStart + bestBreak + 1;
+      }
+    }
+
+    const chunk = content.slice(start, end).trim();
+    if (chunk) {
+      chunks.push(chunk);
+    }
+
+    if (end >= content.length) {
+      break;
+    }
+    start = Math.max(end - normalizedOverlapChars, start + 1);
+  }
+
+  return chunks;
+};
+
 const truncateText = (text: string, maxLength: number) => {
   if (text.length <= maxLength) {
     return text;
   }
   return `${text.slice(0, maxLength - 3)}...`;
+};
+
+const extractSearchTerms = (query: string) => {
+  const quotedTerms = Array.from(query.matchAll(/"([^"]{3,})"/g))
+    .map((match) => match[1].trim())
+    .filter(Boolean);
+  const words = query
+    .toLowerCase()
+    .match(/[a-z0-9_./-]{4,}/g) || [];
+  return Array.from(new Set([...quotedTerms, ...words])).slice(0, 20);
+};
+
+const extractSearchPhrases = (query: string) => {
+  const quotedTerms = Array.from(query.matchAll(/"([^"]{3,})"/g))
+    .map((match) => match[1].trim().toLowerCase())
+    .filter(Boolean);
+  const normalizedQuery = query.replace(/\s+/g, ' ').trim().toLowerCase();
+  if (normalizedQuery.length >= 8) {
+    quotedTerms.push(normalizedQuery);
+  }
+  return Array.from(new Set(quotedTerms)).slice(0, 8);
+};
+
+const extractRelevantSnippet = (content: string, query: string, maxLength: number) => {
+  if (content.length <= maxLength) {
+    return content.trim();
+  }
+
+  const normalizedContent = content.toLowerCase();
+  const terms = extractSearchTerms(query);
+  let bestIndex = -1;
+  let bestTermLength = 0;
+
+  for (const term of terms) {
+    const index = normalizedContent.indexOf(term.toLowerCase());
+    if (index !== -1 && (bestIndex === -1 || term.length > bestTermLength)) {
+      bestIndex = index;
+      bestTermLength = term.length;
+    }
+  }
+
+  if (bestIndex === -1) {
+    return truncateText(content.trim(), maxLength);
+  }
+
+  const contextBefore = Math.max(0, Math.floor((maxLength - bestTermLength) / 2));
+  const start = Math.max(0, bestIndex - contextBefore);
+  const end = Math.min(content.length, start + maxLength);
+  const prefix = start > 0 ? '...' : '';
+  const suffix = end < content.length ? '...' : '';
+  return `${prefix}${content.slice(start, end).trim()}${suffix}`;
+};
+
+const normalizeWeaviateMatches = (
+  matches: any[],
+  className: string,
+  query: string,
+  scoreLabel: string,
+  snippetLength: number,
+): WeaviateContextItem[] => matches
+  .filter((item: any) => typeof item.content === 'string' && item.content.trim())
+  .map((item: any) => {
+    const score = typeof item._additional?.score === 'string'
+      ? Number(item._additional.score)
+      : item._additional?.score;
+    return {
+      id: item._additional?.id,
+      className,
+      content: extractRelevantSnippet(item.content.trim(), query, snippetLength),
+      fileName: item.filePath || item.fileName,
+      filePath: item.filePath,
+      certainty: item._additional?.certainty,
+      score: typeof score === 'number' && Number.isFinite(score) ? score : undefined,
+      scoreLabel,
+      chunkIndex: item.chunkIndex,
+      chunkCount: item.chunkCount,
+      sourceUrl: item._additional?.id
+        ? `/api/weaviate/source/${encodeURIComponent(className)}/${encodeURIComponent(item._additional.id)}`
+        : undefined,
+    };
+  });
+
+const mergeWeaviateResults = (...resultSets: WeaviateContextItem[][]) => {
+  const byId = new Map<string, WeaviateContextItem>();
+  for (const resultSet of resultSets) {
+    for (const item of resultSet) {
+      const key = item.id || `${item.className}:${item.filePath || item.fileName}:${item.content.slice(0, 80)}`;
+      const existing = byId.get(key);
+      if (!existing) {
+        byId.set(key, item);
+        continue;
+      }
+
+      byId.set(key, {
+        ...existing,
+        certainty: Math.max(existing.certainty || 0, item.certainty || 0) || existing.certainty || item.certainty,
+        score: Math.max(existing.score || 0, item.score || 0) || existing.score || item.score,
+        scoreLabel: existing.scoreLabel === 'keyword' ? existing.scoreLabel : item.scoreLabel,
+      });
+    }
+  }
+
+  return Array.from(byId.values());
+};
+
+const countOccurrences = (text: string, term: string) => {
+  if (!term) {
+    return 0;
+  }
+
+  let count = 0;
+  let index = text.indexOf(term);
+  while (index !== -1) {
+    count += 1;
+    index = text.indexOf(term, index + term.length);
+  }
+  return count;
+};
+
+const rerankWeaviateResults = (query: string, items: WeaviateContextItem[], limit: number) => {
+  const terms = extractSearchTerms(query).map(term => term.toLowerCase());
+  const phrases = extractSearchPhrases(query);
+  const scoredItems = items.map((item) => {
+    const searchableText = [
+      item.fileName,
+      item.filePath,
+      item.content,
+    ].filter(Boolean).join('\n').toLowerCase();
+
+    const matchedTerms = terms.filter(term => searchableText.includes(term));
+    const termFrequency = matchedTerms.reduce((total, term) => total + Math.min(countOccurrences(searchableText, term), 5), 0);
+    const phraseMatches = phrases.reduce((total, phrase) => total + (searchableText.includes(phrase) ? 1 : 0), 0);
+    const coverage = terms.length ? matchedTerms.length / terms.length : 0;
+    const normalizedWeaviateScore = typeof item.score === 'number' ? Math.min(item.score, 10) / 10 : 0;
+    const normalizedCertainty = typeof item.certainty === 'number' ? item.certainty : 0;
+    const filePathBoost = item.filePath && terms.some(term => item.filePath?.toLowerCase().includes(term)) ? 0.4 : 0;
+
+    return {
+      ...item,
+      rerankScore: (
+        phraseMatches * 3
+        + coverage * 2
+        + Math.min(termFrequency, 10) * 0.2
+        + normalizedWeaviateScore
+        + normalizedCertainty
+        + filePathBoost
+      ),
+    };
+  });
+
+  return scoredItems
+    .sort((left, right) => (
+      (right.rerankScore || 0) - (left.rerankScore || 0)
+      || (right.score || 0) - (left.score || 0)
+      || (right.certainty || 0) - (left.certainty || 0)
+    ))
+    .slice(0, limit);
 };
 
 const searchWeaviateContext = async (query: string, className: string, limit: number): Promise<WeaviateContextItem[]> => {
@@ -357,28 +586,41 @@ const searchWeaviateContext = async (query: string, className: string, limit: nu
       return [];
     }
 
-    const result = await weaviateClient.graphql
-      .get()
-      .withClassName(className)
-      .withFields('content fileName filePath _additional { id certainty }')
-      .withNearText({ concepts: [query] })
-      .withLimit(limit)
-      .do();
+    const snippetLength = Math.max(1000, Math.floor(WEAVIATE_CONTEXT_CHARS / Math.max(1, limit)));
+    const candidateLimit = Math.max(limit, Math.min(100, Math.ceil(limit * Math.max(1, WEAVIATE_RERANK_CANDIDATE_MULTIPLIER))));
+    const searchableProperties = ['content^3', 'fileName', 'filePath'];
+    const [hybridResult, keywordResult] = await Promise.allSettled([
+      weaviateClient.graphql
+        .get()
+        .withClassName(className)
+        .withFields('content fileName filePath chunkIndex chunkCount _additional { id score }')
+        .withHybrid({ query, alpha: WEAVIATE_HYBRID_ALPHA, properties: searchableProperties })
+        .withLimit(candidateLimit)
+        .do(),
+      weaviateClient.graphql
+        .get()
+        .withClassName(className)
+        .withFields('content fileName filePath chunkIndex chunkCount _additional { id score }')
+        .withBm25({ query, properties: searchableProperties })
+        .withLimit(candidateLimit)
+        .do(),
+    ]);
 
-    const matches = result?.data?.Get?.[className] || [];
-    return matches
-      .filter((item: any) => typeof item.content === 'string' && item.content.trim())
-      .map((item: any) => ({
-        id: item._additional?.id,
-        className,
-        content: item.content.trim(),
-        fileName: item.filePath || item.fileName,
-        filePath: item.filePath,
-        certainty: item._additional?.certainty,
-        sourceUrl: item._additional?.id
-          ? `/api/weaviate/source/${encodeURIComponent(className)}/${encodeURIComponent(item._additional.id)}`
-          : undefined,
-      }));
+    if (hybridResult.status === 'rejected') {
+      console.warn(`Weaviate hybrid lookup failed for '${className}': ${errorMessage(hybridResult.reason)}`);
+    }
+    if (keywordResult.status === 'rejected') {
+      console.warn(`Weaviate keyword lookup failed for '${className}': ${errorMessage(keywordResult.reason)}`);
+    }
+
+    const hybridMatches = hybridResult.status === 'fulfilled'
+      ? normalizeWeaviateMatches(hybridResult.value?.data?.Get?.[className] || [], className, query, 'hybrid', snippetLength)
+      : [];
+    const keywordMatches = keywordResult.status === 'fulfilled'
+      ? normalizeWeaviateMatches(keywordResult.value?.data?.Get?.[className] || [], className, query, 'keyword', snippetLength)
+      : [];
+
+    return rerankWeaviateResults(query, mergeWeaviateResults(hybridMatches, keywordMatches), limit);
   } catch (error) {
     console.warn(`Weaviate context lookup failed; sending prompt without retrieved context: ${errorMessage(error)}`);
     return [];
@@ -390,7 +632,12 @@ const searchWeaviateContexts = async (query: string, classNames: string[], limit
   const resultsByClass = await Promise.all(classNames.map((className) => searchWeaviateContext(query, className, perClassLimit)));
   return resultsByClass
     .flat()
-    .sort((left, right) => (right.certainty || 0) - (left.certainty || 0))
+    .sort((left, right) => (
+      (right.rerankScore || 0) - (left.rerankScore || 0)
+      ||
+      (right.score || 0) - (left.score || 0)
+      || (right.certainty || 0) - (left.certainty || 0)
+    ))
     .slice(0, limit);
 };
 
@@ -426,10 +673,17 @@ const buildPromptWithWeaviateContext = async (
   const charsPerItem = Math.max(500, Math.floor(contextOptions.contextChars / contextItems.length));
   const contextBlock = contextItems.map((item, index) => {
     const sourceName = item.fileName ? `${item.className}/${item.fileName}` : item.className;
-    const source = `Source: ${sourceName}`;
-    const score = typeof item.certainty === 'number' ? `, certainty ${item.certainty.toFixed(3)}` : '';
+    const chunk = typeof item.chunkIndex === 'number' && typeof item.chunkCount === 'number'
+      ? `, chunk ${item.chunkIndex + 1}/${item.chunkCount}`
+      : '';
+    const source = `Source: ${sourceName}${chunk}`;
+    const relevance = typeof item.score === 'number'
+      ? `, ${item.scoreLabel || 'score'} ${item.score.toFixed(3)}${typeof item.rerankScore === 'number' ? `, rerank ${item.rerankScore.toFixed(3)}` : ''}`
+      : typeof item.certainty === 'number'
+        ? `, certainty ${item.certainty.toFixed(3)}`
+        : '';
     const link = item.sourceUrl ? `\nLink: ${item.sourceUrl}` : '';
-    return `[${index + 1}] ${source}${score}${link}\n${truncateText(item.content, charsPerItem)}`;
+    return `[${index + 1}] ${source}${relevance}${link}\n${truncateText(item.content, charsPerItem)}`;
   }).join('\n\n');
 
   return {
@@ -450,6 +704,40 @@ const buildPromptWithWeaviateContext = async (
   };
 };
 
+type ActiveOllamaStream = {
+  abortController: AbortController;
+  responseStream?: {
+    destroy?: (error?: Error) => void;
+  };
+  stopped: boolean;
+};
+
+const WS_OPEN = 1;
+
+const safeWsSend = (ws: any, message: string) => {
+  try {
+    if (ws.readyState === WS_OPEN) {
+      ws.send(message);
+    }
+  } catch (error) {
+    console.warn('⚠️ Skipped WebSocket send:', errorMessage(error));
+  }
+};
+
+const stopActiveStream = (ws: any, reason = 'Stopped by user') => {
+  const activeStream = ws.activeOllamaStream as ActiveOllamaStream | undefined;
+  if (!activeStream) {
+    return;
+  }
+
+  activeStream.stopped = true;
+  if (!activeStream.abortController.signal.aborted) {
+    activeStream.abortController.abort();
+  }
+  activeStream.responseStream?.destroy?.(new Error(reason));
+  ws.activeOllamaStream = undefined;
+};
+
 // Store active WebSocket connections
 const clients = new Set();
 
@@ -467,20 +755,38 @@ wss.on('connection', (ws: any, req: any) => {
       const { type, payload } = data;
       console.log('   Type:', type);
 
+      if (type === 'stop') {
+        stopActiveStream(ws);
+        return;
+      }
+
       if (type === 'message') {
         const { text, className, classNames, model, useWeaviateContext = true } = payload;
         const generationOptions = normalizeGenerationOptions(payload);
         const contextOptions = normalizeContextOptions(payload);
         console.log('👤 User message:', text);
 
+        stopActiveStream(ws, 'Superseded by a new request');
+        const activeStream: ActiveOllamaStream = {
+          abortController: new AbortController(),
+          stopped: false,
+        };
+        ws.activeOllamaStream = activeStream;
+
         try {
           const resolvedModel = await resolveOllamaModel(model);
+          if (activeStream.stopped || activeStream.abortController.signal.aborted || ws.readyState !== WS_OPEN) {
+            return;
+          }
           const {
             prompt,
             classNames: contextClassNames,
             contextCount,
             contextItems,
           } = await buildPromptWithWeaviateContext(text, classNames, useWeaviateContext, className, contextOptions);
+          if (activeStream.stopped || activeStream.abortController.signal.aborted || ws.readyState !== WS_OPEN) {
+            return;
+          }
 
           // Stream response from Ollama with timeout
           console.log('🔵 Sending request to Ollama...');
@@ -503,13 +809,19 @@ wss.on('connection', (ws: any, req: any) => {
             },
             { 
               responseType: 'stream',
-              timeout: 300000 // 5 minute timeout
+              timeout: 300000, // 5 minute timeout
+              signal: activeStream.abortController.signal,
             }
           );
+          if (activeStream.stopped || activeStream.abortController.signal.aborted || ws.readyState !== WS_OPEN) {
+            response.data.destroy?.();
+            return;
+          }
+          activeStream.responseStream = response.data;
 
           console.log('🟢 Response received from Ollama, status:', response.status);
           if (resolvedModel.fallback) {
-            ws.send(JSON.stringify({
+            safeWsSend(ws, JSON.stringify({
               type: 'model',
               payload: {
                 model: resolvedModel.model,
@@ -519,7 +831,7 @@ wss.on('connection', (ws: any, req: any) => {
             }));
           }
           if (contextItems.length > 0) {
-            ws.send(JSON.stringify({
+            safeWsSend(ws, JSON.stringify({
               type: 'context',
               payload: {
                 className: contextClassNames[0],
@@ -532,6 +844,8 @@ wss.on('connection', (ws: any, req: any) => {
                   fileName: item.fileName,
                   filePath: item.filePath || item.fileName,
                   certainty: item.certainty,
+                  score: item.score,
+                  scoreLabel: item.scoreLabel,
                   sourceUrl: item.sourceUrl,
                 })),
               },
@@ -546,6 +860,9 @@ wss.on('connection', (ws: any, req: any) => {
             try {
               const json = JSON.parse(line);
               console.log(`   Line ${idx}: done=${json.done}, hasResponse=${!!json.response}, hasThinking=${!!json.thinking}`);
+              if (activeStream.stopped || ws.readyState !== WS_OPEN) {
+                return;
+              }
               
               // Capture thinking context if present
               if (json.thinking) {
@@ -555,7 +872,7 @@ wss.on('connection', (ws: any, req: any) => {
                   payload: { text: json.thinking },
                 });
                 console.log('   → Sending thinking:', json.thinking.substring(0, 30));
-                ws.send(thinkingMsg);
+                safeWsSend(ws, thinkingMsg);
               }
               
               // Capture response text - Ollama sends fresh text each chunk
@@ -565,7 +882,7 @@ wss.on('connection', (ws: any, req: any) => {
                   payload: { text: json.response },
                 });
                 console.log('   → Sending stream:', json.response.substring(0, 30));
-                ws.send(streamMsg);
+                safeWsSend(ws, streamMsg);
               }
               
               // Check if stream is done
@@ -579,7 +896,7 @@ wss.on('connection', (ws: any, req: any) => {
           };
           
           response.data.on('data', (chunk: Buffer) => {
-            if (isStreamComplete) return;
+            if (isStreamComplete || activeStream.stopped || ws.readyState !== WS_OPEN) return;
             
             chunkCount++;
             console.log(`📦 Chunk ${chunkCount} received: ${chunk.length} bytes`);
@@ -593,6 +910,12 @@ wss.on('connection', (ws: any, req: any) => {
           });
 
           response.data.on('end', () => {
+            if (activeStream.stopped || ws.readyState !== WS_OPEN) {
+              if (ws.activeOllamaStream === activeStream) {
+                ws.activeOllamaStream = undefined;
+              }
+              return;
+            }
             if (streamBuffer.trim() && !isStreamComplete) {
               handleOllamaLine(streamBuffer, 0);
             }
@@ -602,28 +925,45 @@ wss.on('connection', (ws: any, req: any) => {
               payload: { text: '', thinking: thinkingContext },
             });
             console.log('   → Sending complete message');
-            ws.send(completeMsg);
+            safeWsSend(ws, completeMsg);
+            if (ws.activeOllamaStream === activeStream) {
+              ws.activeOllamaStream = undefined;
+            }
           });
 
           response.data.on('error', (error: Error) => {
+            if (activeStream.stopped || activeStream.abortController.signal.aborted) {
+              if (ws.activeOllamaStream === activeStream) {
+                ws.activeOllamaStream = undefined;
+              }
+              return;
+            }
             console.error('❌ Stream error:', error.message);
-            ws.send(JSON.stringify({
+            safeWsSend(ws, JSON.stringify({
               type: 'error',
               payload: { error: `Stream error: ${error.message}` },
             }));
           });
         } catch (streamError) {
+          if (activeStream.stopped || activeStream.abortController.signal.aborted) {
+            console.log('🛑 Ollama request aborted');
+            return;
+          }
           console.error('❌ Ollama request error:', ollamaErrorMessage(streamError));
           console.error('   Stack:', errorStack(streamError));
-          ws.send(JSON.stringify({
+          safeWsSend(ws, JSON.stringify({
             type: 'error',
             payload: { error: `Connection error: ${ollamaErrorMessage(streamError)}` },
           }));
+        } finally {
+          if (ws.activeOllamaStream === activeStream && (activeStream.stopped || activeStream.abortController.signal.aborted)) {
+            ws.activeOllamaStream = undefined;
+          }
         }
       }
     } catch (error) {
       console.error('Error:', errorMessage(error));
-      ws.send(JSON.stringify({
+      safeWsSend(ws, JSON.stringify({
         type: 'error',
         payload: { error: errorMessage(error) },
       }));
@@ -632,6 +972,7 @@ wss.on('connection', (ws: any, req: any) => {
 
   ws.on('close', () => {
     console.log('Client disconnected');
+    stopActiveStream(ws, 'WebSocket closed');
     clients.delete(ws);
   });
 
@@ -745,10 +1086,15 @@ app.get('/api/weaviate/source/:className/:id', async (req, res) => {
     const fileName = typeof properties.fileName === 'string' ? properties.fileName : 'source.txt';
     const filePath = typeof properties.filePath === 'string' ? properties.filePath : fileName;
     const content = typeof properties.content === 'string' ? properties.content : '';
+    const chunkIndex = typeof properties.chunkIndex === 'number' ? properties.chunkIndex : undefined;
+    const chunkCount = typeof properties.chunkCount === 'number' ? properties.chunkCount : undefined;
+    const chunkLine = typeof chunkIndex === 'number' && typeof chunkCount === 'number'
+      ? [`Chunk: ${chunkIndex + 1}/${chunkCount}`, '']
+      : [];
 
     res.setHeader('Content-Type', 'text/plain; charset=utf-8');
     res.setHeader('Content-Disposition', `inline; filename="${fileName.replace(/"/g, '')}"`);
-    res.send([`Source: ${filePath}`, '', content].join('\n'));
+    res.send([`Source: ${filePath}`, ...chunkLine, content].join('\n'));
   } catch (error) {
     console.error('Weaviate source lookup error:', errorMessage(error));
     res.status(404).send(`Source not found: ${errorMessage(error)}`);
@@ -767,20 +1113,31 @@ app.get('/api/weaviate/collections/:className/files', async (req, res) => {
     const result = await weaviateClient.graphql
       .get()
       .withClassName(className)
-      .withFields('fileName filePath mimeType size uploadedAt _additional { id }')
-      .withLimit(1000)
+      .withFields('fileName filePath fileId mimeType size uploadedAt chunkIndex chunkCount _additional { id }')
+      .withLimit(10000)
       .do();
 
-    const files = (result?.data?.Get?.[className] || [])
-      .map((file: any) => ({
-        id: file._additional?.id,
+    const filesByPath = new Map<string, any>();
+    for (const file of result?.data?.Get?.[className] || []) {
+      const id = file._additional?.id;
+      const filePath = file.filePath || file.fileName;
+      if (typeof id !== 'string' || typeof filePath !== 'string') {
+        continue;
+      }
+      const existing = filesByPath.get(filePath);
+      filesByPath.set(filePath, {
+        id: existing?.id || id,
         fileName: file.fileName,
-        filePath: file.filePath || file.fileName,
+        filePath,
+        fileId: file.fileId,
         mimeType: file.mimeType,
         size: file.size,
         uploadedAt: file.uploadedAt,
-      }))
-      .filter((file: any) => typeof file.id === 'string')
+        chunkCount: Math.max(existing?.chunkCount || 1, file.chunkCount || 1),
+      });
+    }
+
+    const files = Array.from(filesByPath.values())
       .sort((left: any, right: any) => (left.filePath || '').localeCompare(right.filePath || ''));
 
     res.json({ className, files, count: files.length });
@@ -803,13 +1160,47 @@ app.delete('/api/weaviate/collections/:className/files/:id', async (req, res) =>
       return;
     }
 
-    await weaviateClient.data
-      .deleter()
+    const source = await weaviateClient.data
+      .getterById()
       .withClassName(className)
       .withId(id)
       .do();
+    const filePath = source?.properties?.filePath;
 
-    res.json({ deleted: id, className });
+    if (typeof filePath !== 'string' || !filePath.trim()) {
+      await weaviateClient.data
+        .deleter()
+        .withClassName(className)
+        .withId(id)
+        .do();
+
+      res.json({ deleted: id, className, deletedCount: 1 });
+      return;
+    }
+
+    const matchingChunks = await weaviateClient.graphql
+      .get()
+      .withClassName(className)
+      .withFields('_additional { id }')
+      .withWhere({
+        path: ['filePath'],
+        operator: 'Equal',
+        valueText: filePath,
+      })
+      .withLimit(10000)
+      .do();
+
+    const chunkIds: string[] = (matchingChunks?.data?.Get?.[className] || [])
+      .map((chunk: any) => chunk._additional?.id)
+      .filter((chunkId: unknown): chunkId is string => typeof chunkId === 'string');
+
+    await Promise.all(chunkIds.map((chunkId) => weaviateClient.data
+      .deleter()
+      .withClassName(className)
+      .withId(chunkId)
+      .do()));
+
+    res.json({ deleted: id, className, filePath, deletedCount: chunkIds.length });
   } catch (error) {
     console.error('Weaviate file delete error:', errorMessage(error));
     if (isConnectionRefused(error)) {
@@ -855,6 +1246,8 @@ app.post('/api/chat', async (req, res) => {
           fileName: item.fileName,
           filePath: item.filePath || item.fileName,
           certainty: item.certainty,
+          score: item.score,
+          scoreLabel: item.scoreLabel,
           sourceUrl: item.sourceUrl,
         })),
       },
@@ -924,23 +1317,37 @@ app.post('/api/weaviate/upload', async (req, res) => {
         continue;
       }
 
-      const result = await weaviateClient.data.creator()
-        .withClassName(className)
-        .withProperties({
-          content: file.content,
-          fileName: file.name,
-          filePath: file.path,
-          mimeType: file.type,
-          size: file.size,
-          uploadedAt,
-        })
-        .do();
+      const chunks = splitContentIntoChunks(file.content);
+      const fileId = createFileId(file.path);
+      let firstChunkId = '';
+
+      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+        const result = await weaviateClient.data.creator()
+          .withClassName(className)
+          .withProperties({
+            content: chunks[chunkIndex],
+            fileName: file.name,
+            filePath: file.path,
+            fileId,
+            chunkIndex,
+            chunkCount: chunks.length,
+            mimeType: file.type,
+            size: file.size,
+            uploadedAt,
+          })
+          .do();
+
+        if (!firstChunkId && typeof result.id === 'string') {
+          firstChunkId = result.id;
+        }
+      }
 
       uploaded.push({
-        id: result.id,
+        id: firstChunkId,
         fileName: file.name,
         filePath: file.path,
         size: file.size,
+        chunkCount: chunks.length,
       });
     }
 

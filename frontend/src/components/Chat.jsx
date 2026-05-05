@@ -216,23 +216,21 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
 
       const defaultCollection = data.defaultCollection || DEFAULT_WEAVIATE_COLLECTION;
       const nextCollections = Array.isArray(data.collections) ? data.collections : [];
-      const names = new Set(nextCollections.map(collection => collection.name));
-      if (!names.has(defaultCollection)) {
-        nextCollections.push({ name: defaultCollection });
-      }
+      const activeCollections = nextCollections
+        .filter(collection => collection?.name)
+        .sort((left, right) => left.name.localeCompare(right.name));
+      const activeNames = new Set(activeCollections.map(collection => collection.name));
+      const fallbackCollection = activeCollections[0]?.name || defaultCollection;
 
-      setCollections(currentCollections => {
-        const byName = new Map();
-        [...currentCollections, ...nextCollections].forEach((collection) => {
-          if (collection?.name) {
-            byName.set(collection.name, collection);
-          }
-        });
-        return Array.from(byName.values()).sort((left, right) => left.name.localeCompare(right.name));
+      setCollections(activeCollections);
+      setSelectedUploadCollection(current => (current && activeNames.has(current) ? current : fallbackCollection));
+      setSelectedContextCollections(current => {
+        const validSelections = current.filter(name => activeNames.has(name));
+        if (validSelections.length) {
+          return validSelections;
+        }
+        return activeCollections.length ? [fallbackCollection] : [];
       });
-
-      setSelectedUploadCollection(current => current || defaultCollection);
-      setSelectedContextCollections(current => (current.length ? current : [defaultCollection]));
     } catch (error) {
       console.error('Failed to refresh Weaviate collections:', error);
       showChatStatus(error.message);
@@ -410,6 +408,25 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
 
   useEffect(() => {
     refreshCollections();
+  }, [weaviateInfo?.status]);
+
+  useEffect(() => {
+    if (weaviateInfo?.status !== 'ready') {
+      setCollections([]);
+      setSelectedContextCollections([]);
+      return undefined;
+    }
+
+    const intervalId = window.setInterval(refreshCollections, 15000);
+    const handleFocus = () => {
+      refreshCollections();
+    };
+    window.addEventListener('focus', handleFocus);
+
+    return () => {
+      window.clearInterval(intervalId);
+      window.removeEventListener('focus', handleFocus);
+    };
   }, [weaviateInfo?.status]);
 
   useEffect(() => {
@@ -703,6 +720,10 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       }
       return updated;
     });
+
+    if (wsRef.current?.readyState === WebSocket.OPEN) {
+      wsRef.current.send(JSON.stringify({ type: 'stop' }));
+    }
 
     if (wsRef.current && wsRef.current.readyState !== WebSocket.CLOSED) {
       wsRef.current.close(4000, 'Stopped by user');
