@@ -124,7 +124,24 @@
 .library-create {
   display: flex;
   align-items: flex-end;
+  flex-wrap: wrap;
   gap: 0.5rem;
+}
+
+.library-create-status {
+  max-width: 280px;
+  padding-bottom: 0.45rem;
+  font-size: 0.8125rem;
+  font-weight: 600;
+  line-height: 1.25;
+}
+
+.library-create-status.success {
+  color: var(--color-accent);
+}
+
+.library-create-status.error {
+  color: #fca5a5;
 }
 
 .library-delete {

@@ -66,7 +66,6 @@ function App() {
     <div className="app">
       <Header
         connected={connected}
-        modelInfo={modelInfo}
         modelOptions={modelOptions}
         selectedModel={selectedModel}
         onModelChange={setSelectedModel}
