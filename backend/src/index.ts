@@ -27,14 +27,20 @@ const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
 const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'uploaded_files';
 const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 20 * 1024 * 1024);
-const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 8);
-const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 16000);
+const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 12);
+const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 12000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
 const WEAVIATE_PQ_TRAINING_LIMIT = Number(process.env.WEAVIATE_PQ_TRAINING_LIMIT || 50000);
-const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 1500);
-const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 250);
+const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 300);
+const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 50);
+const WEAVIATE_UPLOAD_MIN_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_MIN_CHUNK_CHARS || 200);
+const WEAVIATE_UPLOAD_CHUNK_DELAY_MS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_DELAY_MS || 20);
+const WEAVIATE_UPLOAD_CHUNK_RETRIES = Number(process.env.WEAVIATE_UPLOAD_CHUNK_RETRIES || 3);
 const WEAVIATE_HYBRID_ALPHA = Number(process.env.WEAVIATE_HYBRID_ALPHA || 0.35);
-const WEAVIATE_RERANK_CANDIDATE_MULTIPLIER = Number(process.env.WEAVIATE_RERANK_CANDIDATE_MULTIPLIER || 5);
+const WEAVIATE_RERANK_CANDIDATE_MULTIPLIER = Number(process.env.WEAVIATE_RERANK_CANDIDATE_MULTIPLIER || 2);
+const WEAVIATE_SEARCH_MAX_CANDIDATES = Number(process.env.WEAVIATE_SEARCH_MAX_CANDIDATES || 24);
+const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLowerCase();
+const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
 const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma3:4b,gemma3:12b,gemma3:27b')
@@ -85,6 +91,17 @@ let ollamaModelCache: { models: string[]; expiresAt: number } | null = null;
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const errorStack = (error: unknown) => error instanceof Error ? error.stack : undefined;
 const isConnectionRefused = (error: unknown) => errorMessage(error).includes('ECONNREFUSED');
+const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const isTransientWeaviateVectorizerError = (error: unknown) => {
+  const message = errorMessage(error);
+  return [
+    'connection reset by peer',
+    'ECONNRESET',
+    'read tcp',
+    't2v-transformers',
+    '/vectors',
+  ].some((fragment) => message.includes(fragment));
+};
 const axiosResponseDetail = (data: unknown, fallback: string) => {
   if (!data) {
     return fallback;
@@ -303,8 +320,8 @@ const normalizeGenerationOptions = (options: { temperature?: unknown; top_p?: un
 });
 
 const normalizeContextOptions = (options: { contextChars?: unknown; contextResults?: unknown } = {}) => ({
-  contextChars: Math.round(clampNumber(options.contextChars, WEAVIATE_CONTEXT_CHARS, 1000, 64000)),
-  contextResults: Math.round(clampNumber(options.contextResults, WEAVIATE_CONTEXT_RESULTS, 1, 30)),
+  contextChars: Math.round(clampNumber(options.contextChars, WEAVIATE_CONTEXT_CHARS, 1000, 24000)),
+  contextResults: Math.round(clampNumber(options.contextResults, WEAVIATE_CONTEXT_RESULTS, 1, 12)),
 });
 
 const ensureFileCollection = async (className: string) => {
@@ -354,7 +371,7 @@ const findExistingFileByPath = async (className: string, filePath: string) => {
   const result = await weaviateClient.graphql
     .get()
     .withClassName(className)
-    .withFields('fileName filePath _additional { id }')
+    .withFields('fileName filePath chunkCount _additional { id }')
     .withWhere({
       path: ['filePath'],
       operator: 'Equal',
@@ -366,10 +383,63 @@ const findExistingFileByPath = async (className: string, filePath: string) => {
   return result?.data?.Get?.[className]?.[0] || null;
 };
 
+const findFileChunkIdsByPath = async (className: string, filePath: string) => {
+  const result = await weaviateClient.graphql
+    .get()
+    .withClassName(className)
+    .withFields('_additional { id }')
+    .withWhere({
+      path: ['filePath'],
+      operator: 'Equal',
+      valueText: filePath,
+    })
+    .withLimit(10000)
+    .do();
+
+  return (result?.data?.Get?.[className] || [])
+    .map((chunk: any) => chunk._additional?.id)
+    .filter((chunkId: unknown): chunkId is string => typeof chunkId === 'string');
+};
+
+const deleteFileChunksByPath = async (className: string, filePath: string) => {
+  const chunkIds = await findFileChunkIdsByPath(className, filePath);
+  await Promise.all(chunkIds.map((chunkId: string) => weaviateClient.data
+    .deleter()
+    .withClassName(className)
+    .withId(chunkId)
+    .do()));
+  return chunkIds.length;
+};
+
 const createFileId = (filePath: string) => Buffer.from(filePath).toString('base64url').slice(0, 96);
 
+const createWeaviateChunkWithRetry = async (className: string, properties: Record<string, unknown>) => {
+  let lastError: unknown;
+  const retries = Math.max(0, Math.floor(WEAVIATE_UPLOAD_CHUNK_RETRIES));
+
+  for (let attempt = 0; attempt <= retries; attempt += 1) {
+    try {
+      return await weaviateClient.data.creator()
+        .withClassName(className)
+        .withProperties(properties)
+        .do();
+    } catch (error) {
+      lastError = error;
+      if (!isTransientWeaviateVectorizerError(error) || attempt >= retries) {
+        throw error;
+      }
+
+      const delayMs = 500 * (attempt + 1) * (attempt + 1);
+      console.warn(`Weaviate vectorizer reset while uploading chunk ${Number(properties.chunkIndex) + 1}/${properties.chunkCount}; retrying in ${delayMs}ms.`);
+      await sleep(delayMs);
+    }
+  }
+
+  throw lastError;
+};
+
 const splitContentIntoChunks = (content: string) => {
-  const normalizedChunkChars = Math.max(1000, WEAVIATE_UPLOAD_CHUNK_CHARS);
+  const normalizedChunkChars = Math.max(WEAVIATE_UPLOAD_MIN_CHUNK_CHARS, WEAVIATE_UPLOAD_CHUNK_CHARS);
   const normalizedOverlapChars = Math.min(
     Math.max(0, WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS),
     Math.floor(normalizedChunkChars / 2),
@@ -586,25 +656,29 @@ const searchWeaviateContext = async (query: string, className: string, limit: nu
       return [];
     }
 
-    const snippetLength = Math.max(1000, Math.floor(WEAVIATE_CONTEXT_CHARS / Math.max(1, limit)));
-    const candidateLimit = Math.max(limit, Math.min(100, Math.ceil(limit * Math.max(1, WEAVIATE_RERANK_CANDIDATE_MULTIPLIER))));
+    const snippetLength = Math.max(300, Math.min(WEAVIATE_SEARCH_SNIPPET_CHARS, Math.floor(WEAVIATE_CONTEXT_CHARS / Math.max(1, limit))));
+    const candidateLimit = Math.max(limit, Math.min(WEAVIATE_SEARCH_MAX_CANDIDATES, Math.ceil(limit * Math.max(1, WEAVIATE_RERANK_CANDIDATE_MULTIPLIER))));
     const searchableProperties = ['content^3', 'fileName', 'filePath'];
-    const [hybridResult, keywordResult] = await Promise.allSettled([
-      weaviateClient.graphql
+    const searchMode = ['hybrid', 'keyword', 'both'].includes(WEAVIATE_SEARCH_MODE) ? WEAVIATE_SEARCH_MODE : 'hybrid';
+    const hybridPromise = searchMode === 'keyword'
+      ? Promise.resolve({ data: { Get: { [className]: [] } } })
+      : weaviateClient.graphql
         .get()
         .withClassName(className)
         .withFields('content fileName filePath chunkIndex chunkCount _additional { id score }')
         .withHybrid({ query, alpha: WEAVIATE_HYBRID_ALPHA, properties: searchableProperties })
         .withLimit(candidateLimit)
-        .do(),
-      weaviateClient.graphql
+        .do();
+    const keywordPromise = searchMode === 'hybrid'
+      ? Promise.resolve({ data: { Get: { [className]: [] } } })
+      : weaviateClient.graphql
         .get()
         .withClassName(className)
         .withFields('content fileName filePath chunkIndex chunkCount _additional { id score }')
         .withBm25({ query, properties: searchableProperties })
         .withLimit(candidateLimit)
-        .do(),
-    ]);
+        .do();
+    const [hybridResult, keywordResult] = await Promise.allSettled([hybridPromise, keywordPromise]);
 
     if (hybridResult.status === 'rejected') {
       console.warn(`Weaviate hybrid lookup failed for '${className}': ${errorMessage(hybridResult.reason)}`);
@@ -689,7 +763,7 @@ const buildPromptWithWeaviateContext = async (
   return {
     prompt: [
       'Answer the user using the Weaviate context below when it is relevant. Be specific and include enough detail to be useful.',
-      'When you use retrieved context, cite sources inline like [1] and include a short "Sources" section at the end with the source file names.',
+      'When you use retrieved context, cite sources inline like [1]. Do not add a "Sources", "References", or bibliography section at the end of the answer.',
       'If the context is sparse or only partially answers the question, say what is missing and answer from the available context plus the user request.',
       '',
       'Weaviate context:',
@@ -1308,23 +1382,28 @@ app.post('/api/weaviate/upload', async (req, res) => {
     for (const file of files) {
       const existingFile = await findExistingFileByPath(className, file.path);
       if (existingFile) {
-        skippedDuplicates.push({
-          id: existingFile._additional?.id,
-          fileName: file.name,
-          filePath: file.path,
-          reason: 'already exists',
-        });
-        continue;
+        const chunkIds = await findFileChunkIdsByPath(className, file.path);
+        const expectedChunkCount = typeof existingFile.chunkCount === 'number' ? existingFile.chunkCount : 1;
+        if (chunkIds.length < expectedChunkCount) {
+          await deleteFileChunksByPath(className, file.path);
+        } else {
+          skippedDuplicates.push({
+            id: existingFile._additional?.id,
+            fileName: file.name,
+            filePath: file.path,
+            reason: 'already exists',
+          });
+          continue;
+        }
       }
 
       const chunks = splitContentIntoChunks(file.content);
       const fileId = createFileId(file.path);
       let firstChunkId = '';
 
-      for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-        const result = await weaviateClient.data.creator()
-          .withClassName(className)
-          .withProperties({
+      try {
+        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+          const result = await createWeaviateChunkWithRetry(className, {
             content: chunks[chunkIndex],
             fileName: file.name,
             filePath: file.path,
@@ -1334,12 +1413,22 @@ app.post('/api/weaviate/upload', async (req, res) => {
             mimeType: file.type,
             size: file.size,
             uploadedAt,
-          })
-          .do();
+          });
 
-        if (!firstChunkId && typeof result.id === 'string') {
-          firstChunkId = result.id;
+          if (!firstChunkId && typeof result.id === 'string') {
+            firstChunkId = result.id;
+          }
+
+          if (WEAVIATE_UPLOAD_CHUNK_DELAY_MS > 0 && chunkIndex < chunks.length - 1) {
+            await sleep(WEAVIATE_UPLOAD_CHUNK_DELAY_MS);
+          }
         }
+      } catch (error) {
+        const deletedCount = await deleteFileChunksByPath(className, file.path);
+        if (deletedCount > 0) {
+          console.warn(`Removed ${deletedCount} partial Weaviate chunk(s) for ${file.path} after upload failure.`);
+        }
+        throw error;
       }
 
       uploaded.push({
@@ -1362,6 +1451,12 @@ app.post('/api/weaviate/upload', async (req, res) => {
     console.error('Weaviate upload error:', errorMessage(error));
     if (isConnectionRefused(error)) {
       res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    if (isTransientWeaviateVectorizerError(error)) {
+      res.status(502).json({
+        error: `Weaviate's transformer vectorizer reset the connection while embedding upload chunks. Retry the upload after the t2v-transformers container is healthy, or increase WEAVIATE_UPLOAD_CHUNK_DELAY_MS. Details: ${errorMessage(error)}`,
+      });
       return;
     }
     res.status(400).json({ error: errorMessage(error) });

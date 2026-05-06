@@ -610,6 +610,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     persistSavedChats(nextChats);
     skipNextAutoSaveRef.current = true;
     setSavedChats(nextChats);
+    setMessages([]);
     setActiveSavedChatId('');
     setShowDeleteChatConfirm(false);
     showChatStatus('Saved chat deleted.');

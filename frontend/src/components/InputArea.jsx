@@ -153,7 +153,7 @@ function InputArea({
   const [showContextSettings, setShowContextSettings] = useState(true);
   const [temperature, setTemperature] = useState('0.2');
   const [topP, setTopP] = useState('0.85');
-  const [contextChars, setContextChars] = useState('16000');
+  const [contextChars, setContextChars] = useState('12000');
   const [newCollectionName, setNewCollectionName] = useState('');
   const [showLibraryManager, setShowLibraryManager] = useState(false);
   const [selectedDeleteCollection, setSelectedDeleteCollection] = useState('');
