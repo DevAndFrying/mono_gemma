@@ -294,8 +294,9 @@ function InputArea({
     new Map(
       [
         ...collections,
-        ...selectedContextCollections.map(name => ({ name })),
-        { name: selectedUploadCollection || 'uploaded_files' },
+        ...(collections.length === 0 || collections.some(collection => collection.name === selectedUploadCollection)
+          ? [{ name: selectedUploadCollection || 'uploaded_files' }]
+          : []),
       ]
         .filter(collection => collection?.name)
         .map(collection => [collection.name, collection])
