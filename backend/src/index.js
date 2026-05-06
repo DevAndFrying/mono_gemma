@@ -899,6 +899,75 @@ app.delete('/api/weaviate/collections/:className', async (req, res) => {
         res.status(400).json({ error: errorMessage(error) });
     }
 });
+
+app.get('/api/weaviate/collections', async (req, res) => {
+  try {
+    const schema = await weaviateClient.schema.getter().do();
+    const collections = (schema.classes || [])
+      .filter((cls) => Array.isArray(cls.properties) && cls.properties.some((property) => property.name === 'content'))
+      .map((cls) => ({
+        name: cls.class,
+        description: cls.description,
+        vectorizer: cls.vectorizer,
+      }))
+      .sort((left, right) => left.name.localeCompare(right.name));
+
+    res.json({
+      defaultCollection: DEFAULT_WEAVIATE_FILE_CLASS,
+      collections,
+    });
+  } catch (error) {
+    console.error('Weaviate collection list error:', error.message);
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(500).json({ error: error.message });
+  }
+});
+
+app.post('/api/weaviate/collections', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.body?.className);
+    await ensureFileCollection(className);
+    res.json({
+      collection: {
+        name: className,
+        description: 'Files uploaded from the frontend',
+        vectorizer: 'text2vec-transformers',
+      },
+    });
+  } catch (error) {
+    console.error('Weaviate collection create error:', error.message);
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: error.message });
+  }
+});
+
+app.delete('/api/weaviate/collections/:className', async (req, res) => {
+  try {
+    const className = normalizeWeaviateClassName(req.params.className);
+    const exists = await weaviateClient.schema.exists(className);
+    if (!exists) {
+      res.status(404).json({ error: `Weaviate library "${className}" does not exist.` });
+      return;
+    }
+
+    await weaviateClient.schema.classDeleter().withClassName(className).do();
+    res.json({ deleted: className });
+  } catch (error) {
+    console.error('Weaviate collection delete error:', error.message);
+    if (isConnectionRefused(error)) {
+      res.status(503).json({ error: weaviateUnavailableMessage() });
+      return;
+    }
+    res.status(400).json({ error: error.message });
+  }
+});
+
 app.get('/api/weaviate/source/:className/:id', async (req, res) => {
     try {
         const className = normalizeWeaviateClassName(req.params.className);
