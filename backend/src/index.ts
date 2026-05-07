@@ -21,7 +21,7 @@ const wss = new WebSocketServer({
 
 // Configuration
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-const MODEL_NAME = process.env.MODEL_NAME || 'gemma3:4b';
+const MODEL_NAME = process.env.MODEL_NAME || 'gemma4:e4b';
 const API_PORT = process.env.API_PORT || 3000;
 const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
@@ -43,7 +43,7 @@ const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLo
 const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
-const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma3:4b,gemma3:12b,gemma3:27b')
+const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma4:e4b,gemma4:26b,gemma4:31b')
   .split(',')
   .map((model) => model.trim())
   .filter(Boolean);
