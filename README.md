@@ -160,9 +160,9 @@ WEAVIATE_RERANK_CANDIDATE_MULTIPLIER=2
 WEAVIATE_SEARCH_MAX_CANDIDATES=24
 WEAVIATE_SEARCH_MODE=hybrid
 WEAVIATE_SEARCH_SNIPPET_CHARS=1200
-WEAVIATE_UPLOAD_CHUNK_CHARS=300
-WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=50
-WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=200
+WEAVIATE_UPLOAD_CHUNK_CHARS=1800
+WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=250
+WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=800
 WEAVIATE_UPLOAD_CHUNK_DELAY_MS=20
 WEAVIATE_UPLOAD_CHUNK_RETRIES=3
 MAX_UPLOAD_FILE_BYTES=20971520
@@ -268,12 +268,14 @@ WEAVIATE_SEARCH_MODE=both
 Tune how uploaded files are split before indexing:
 
 ```env
-WEAVIATE_UPLOAD_CHUNK_CHARS=300
-WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=50
-WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=200
+WEAVIATE_UPLOAD_CHUNK_CHARS=1800
+WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=250
+WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=800
 WEAVIATE_UPLOAD_CHUNK_DELAY_MS=20
 WEAVIATE_UPLOAD_CHUNK_RETRIES=3
 ```
+
+Uploaded text is split on heading, paragraph, Markdown table, and code boundaries before falling back to character windows. Large Markdown tables are split by row with the table header repeated in each chunk. Chunks store section, language, type, and line-range metadata; matching chunks are expanded with adjacent chunks during retrieval.
 
 Chunk settings apply only to newly uploaded files. Delete and re-upload an existing library if you want it re-indexed with the new chunk size.
 
