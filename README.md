@@ -74,7 +74,7 @@ Use `docker-start.sh` as the normal entry point:
 The script checks for:
 
 - Docker Compose
-- RTX 5080 plus Docker NVIDIA runtime
+- NVIDIA GPU plus Docker NVIDIA runtime
 - host Ollama at `http://localhost:11434/api/tags`
 
 If host Ollama is running and already has models, the backend uses your host models automatically. Otherwise it uses the Docker Ollama service.
@@ -104,6 +104,44 @@ MCP_OLLAMA_MODE=container ./docker-start.sh
 ```
 
 Use both overrides together:
+
+```bash
+MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
+```
+
+## AWS G6e GPU Setup
+
+`g6e.xlarge` has 1 NVIDIA L40S GPU with 48 GB GPU memory, 4 vCPUs, and 32 GiB instance memory. That is enough GPU memory for this stack's default `gemma3:4b` and many larger quantized Ollama models.
+
+Recommended EC2 setup:
+
+- Instance type: `g6e.xlarge`
+- AMI: AWS Deep Learning AMI with NVIDIA drivers, or Ubuntu 22.04/24.04 with NVIDIA drivers installed
+- Storage: at least 100 GB EBS for Docker images, Ollama models, Weaviate data, and uploads
+- Security group: expose `3000` only to your IP; keep `8080`, `11434`, and `5432` private unless you explicitly need remote access
+
+On a fresh Ubuntu GPU host with NVIDIA drivers already working, run:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl
+git clone <this-repo-url>
+cd mono_gemma
+./scripts/bootstrap-g6e-ubuntu.sh
+newgrp docker # only needed if Docker was just installed and docker requires sudo
+MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=container ./docker-start.sh
+```
+
+Validate CUDA/GPU access:
+
+```bash
+nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.0.0-runtime-ubuntu22.04 nvidia-smi
+docker exec -it mcp-ollama ollama pull gemma3:4b
+docker exec -it mcp-ollama ollama ps
+```
+
+The GPU compose overlay gives GPU access to both Ollama and Weaviate's `t2v-transformers` embedding sidecar. If you use host Ollama instead of container Ollama, keep `MCP_ACCELERATOR=gpu` so Weaviate embeddings still use CUDA:
 
 ```bash
 MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
