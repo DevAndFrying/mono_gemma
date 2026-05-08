@@ -31,34 +31,50 @@ COMPOSE_FILES=(-f docker-compose.yml)
 ACCELERATOR="${MCP_ACCELERATOR:-auto}"
 OLLAMA_MODE="${MCP_OLLAMA_MODE:-auto}"
 
-detect_rtx_5080() {
+detect_nvidia_gpu_runtime() {
     if ! command -v nvidia-smi > /dev/null 2>&1; then
         return 1
     fi
 
-    if ! nvidia-smi --query-gpu=name --format=csv,noheader | grep -qi "5080"; then
+    if ! nvidia-smi --query-gpu=name --format=csv,noheader | grep -q .; then
         return 1
     fi
 
-    if ! docker info 2> /dev/null | grep -qi "nvidia"; then
+    if ! docker info --format '{{json .Runtimes}}' 2> /dev/null | grep -qi "nvidia"; then
         return 1
     fi
 
     return 0
 }
 
+validate_docker_gpu() {
+    docker run --rm --gpus all nvidia/cuda:12.0.0-runtime-ubuntu22.04 nvidia-smi > /dev/null
+}
+
 if [ "$ACCELERATOR" = "gpu" ]; then
     echo "✓ MCP_ACCELERATOR=gpu set. Enabling GPU for Ollama and Weaviate transformer embeddings."
+    if ! command -v nvidia-smi > /dev/null 2>&1; then
+        echo "❌ nvidia-smi not found on host. Install/repair the NVIDIA driver before using GPU mode."
+        exit 1
+    fi
+    if ! validate_docker_gpu; then
+        echo "❌ Docker cannot access the NVIDIA GPU. Run ./scripts/bootstrap-g6e-ubuntu.sh, then restart Docker and retry."
+        exit 1
+    fi
     COMPOSE_FILES+=(-f docker-compose.gpu.yml)
 elif [ "$ACCELERATOR" = "cpu" ]; then
     echo "✓ MCP_ACCELERATOR=cpu set. Using CPU for Ollama and Weaviate embeddings."
-elif detect_rtx_5080; then
-    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | grep -i "5080" | head -n 1)
-    echo "✓ RTX 5080 detected: $GPU_NAME"
-    echo "✓ Enabling GPU for Ollama and Weaviate transformer embeddings"
-    COMPOSE_FILES+=(-f docker-compose.gpu.yml)
+elif detect_nvidia_gpu_runtime; then
+    GPU_NAME=$(nvidia-smi --query-gpu=name --format=csv,noheader | head -n 1)
+    if validate_docker_gpu; then
+        echo "✓ NVIDIA GPU detected: $GPU_NAME"
+        echo "✓ Enabling GPU for Ollama and Weaviate transformer embeddings"
+        COMPOSE_FILES+=(-f docker-compose.gpu.yml)
+    else
+        echo "⚠️  NVIDIA GPU was detected, but Docker could not access it. Using CPU for Ollama and Weaviate embeddings."
+    fi
 else
-    echo "⚠️  RTX 5080 with Docker NVIDIA runtime not detected. Using CPU for Ollama and Weaviate embeddings."
+    echo "⚠️  NVIDIA GPU with Docker NVIDIA runtime not detected. Using CPU for Ollama and Weaviate embeddings."
 fi
 
 host_ollama_has_models() {

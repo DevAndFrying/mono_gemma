@@ -74,7 +74,7 @@ Use `docker-start.sh` as the normal entry point:
 The script checks for:
 
 - Docker Compose
-- RTX 5080 plus Docker NVIDIA runtime
+- NVIDIA GPU plus Docker NVIDIA runtime
 - host Ollama at `http://localhost:11434/api/tags`
 
 If host Ollama is running and already has models, the backend uses your host models automatically. Otherwise it uses the Docker Ollama service.
@@ -109,6 +109,58 @@ Use both overrides together:
 MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
 ```
 
+## AWS G6e GPU Setup
+
+`g6e.xlarge` has 1 NVIDIA L40S GPU with 48 GB GPU memory, 4 vCPUs, and 32 GiB instance memory. That is enough GPU memory for this stack's default `gemma4:e4b` and many larger quantized Ollama models.
+
+Recommended EC2 setup:
+
+- Instance type: `g6e.xlarge`
+- AMI: AWS Deep Learning AMI with NVIDIA drivers, or Ubuntu 22.04/24.04 with NVIDIA drivers installed
+- Storage: at least 100 GB EBS for Docker images, Ollama models, Weaviate data, and uploads
+- Security group: expose `3000` only to your IP; keep `8080`, `11434`, and `5432` private unless you explicitly need remote access
+
+On a fresh Ubuntu GPU host with NVIDIA drivers already working, run:
+
+```bash
+sudo apt-get update
+sudo apt-get install -y git curl
+git clone <this-repo-url>
+cd mono_gemma
+./scripts/bootstrap-g6e-ubuntu.sh
+newgrp docker # only needed if Docker was just installed and docker requires sudo
+MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=container ./docker-start.sh
+```
+
+On a fresh Ubuntu host that still needs Docker, Docker Compose, and the NVIDIA driver installed, run:
+
+```bash
+./scripts/ec2-g6e-entry.sh
+sudo reboot
+```
+
+After reconnecting, start the app from the repo directory:
+
+```bash
+newgrp docker # only needed if Docker was just installed and docker requires sudo
+MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=container ./docker-start.sh
+```
+
+Validate CUDA/GPU access:
+
+```bash
+nvidia-smi
+docker run --rm --gpus all nvidia/cuda:12.0.0-runtime-ubuntu22.04 nvidia-smi
+docker exec -it mcp-ollama ollama pull gemma4:e4b
+docker exec -it mcp-ollama ollama ps
+```
+
+The GPU compose overlay gives GPU access to both Ollama and Weaviate's `t2v-transformers` embedding sidecar. If you use host Ollama instead of container Ollama, keep `MCP_ACCELERATOR=gpu` so Weaviate embeddings still use CUDA:
+
+```bash
+MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
+```
+
 ## Models
 
 The selected model only affects chat answers. File uploads to Weaviate use Weaviate's embedding sidecar, not the selected Ollama model.
@@ -130,7 +182,7 @@ docker exec -it mcp-ollama ollama list
 Default/suggested models are controlled with:
 
 ```env
-MODEL_NAME=gemma3:4b
+MODEL_NAME=gemma4:e4b
 SUGGESTED_MODELS=gemma4:e4b,gemma4:26b,gemma4:31b
 ```
 
@@ -142,7 +194,7 @@ For local dev, create or edit `backend/.env`:
 
 ```env
 OLLAMA_BASE_URL=http://localhost:11434
-MODEL_NAME=gemma3:4b
+MODEL_NAME=gemma4:e4b
 API_PORT=3002
 MCP_PORT=3001
 WEAVIATE_URL=http://localhost:8080
@@ -154,8 +206,17 @@ PGUSER=mcp
 PGPASSWORD=mcp_dev_password
 WEAVIATE_ENABLE_PQ=false
 WEAVIATE_PQ_TRAINING_LIMIT=50000
-WEAVIATE_CONTEXT_RESULTS=8
-WEAVIATE_CONTEXT_CHARS=16000
+WEAVIATE_CONTEXT_RESULTS=12
+WEAVIATE_CONTEXT_CHARS=12000
+WEAVIATE_RERANK_CANDIDATE_MULTIPLIER=2
+WEAVIATE_SEARCH_MAX_CANDIDATES=24
+WEAVIATE_SEARCH_MODE=hybrid
+WEAVIATE_SEARCH_SNIPPET_CHARS=1200
+WEAVIATE_UPLOAD_CHUNK_CHARS=1800
+WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=250
+WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=800
+WEAVIATE_UPLOAD_CHUNK_DELAY_MS=20
+WEAVIATE_UPLOAD_CHUNK_RETRIES=3
 MAX_UPLOAD_FILE_BYTES=20971520
 OLLAMA_MODEL_CACHE_MS=30000
 OLLAMA_KEEP_ALIVE=10m
@@ -240,16 +301,35 @@ uploadedAt
 Tune how much Weaviate context is retrieved:
 
 ```env
-WEAVIATE_CONTEXT_RESULTS=8
-WEAVIATE_CONTEXT_CHARS=16000
+WEAVIATE_CONTEXT_RESULTS=12
+WEAVIATE_CONTEXT_CHARS=12000
+WEAVIATE_RERANK_CANDIDATE_MULTIPLIER=2
+WEAVIATE_SEARCH_MAX_CANDIDATES=24
+WEAVIATE_SEARCH_MODE=hybrid
+WEAVIATE_SEARCH_SNIPPET_CHARS=1200
 ```
 
 For more information per answer:
 
 ```env
 WEAVIATE_CONTEXT_RESULTS=12
-WEAVIATE_CONTEXT_CHARS=30000
+WEAVIATE_CONTEXT_CHARS=20000
+WEAVIATE_SEARCH_MODE=both
 ```
+
+Tune how uploaded files are split before indexing:
+
+```env
+WEAVIATE_UPLOAD_CHUNK_CHARS=1800
+WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=250
+WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=800
+WEAVIATE_UPLOAD_CHUNK_DELAY_MS=20
+WEAVIATE_UPLOAD_CHUNK_RETRIES=3
+```
+
+Uploaded text is split on heading, paragraph, Markdown table, and code boundaries before falling back to character windows. Large Markdown tables are split by row with the table header repeated in each chunk. Chunks store section, language, type, and line-range metadata; matching chunks are expanded with adjacent chunks during retrieval.
+
+Chunk settings apply only to newly uploaded files. Delete and re-upload an existing library if you want it re-indexed with the new chunk size.
 
 Larger values give the model more source material but can slow responses and may reduce focus on smaller models.
 

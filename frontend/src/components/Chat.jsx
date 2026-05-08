@@ -177,6 +177,16 @@ const serializeChatAsMarkdown = (messages) => {
   return lines.join('\n');
 };
 
+const isNearScrollBottom = (element, threshold = 80) => (
+  element.scrollHeight - element.scrollTop - element.clientHeight <= threshold
+);
+
+const scrollToBottom = (element) => {
+  if (element) {
+    element.scrollTop = element.scrollHeight;
+  }
+};
+
 function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const [messages, setMessages] = useState([]);
   const [savedChats, setSavedChats] = useState(() => loadSavedChats());
@@ -193,12 +203,73 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const [wsConnected, setWsConnected] = useState(false);
   const wsRef = useRef(null);
   const deleteChatConfirmRef = useRef(null);
-  const messagesEndRef = useRef(null);
+  const messagesAreaRef = useRef(null);
   const hasShownModelLoadingRef = useRef(false);
   const chatStatusTimeoutRef = useRef(null);
   const autoSaveTimeoutRef = useRef(null);
   const skipNextAutoSaveRef = useRef(false);
   const reconnectAfterCloseRef = useRef(false);
+  const shouldStickToBottomRef = useRef(true);
+  const lastTouchYRef = useRef(null);
+  const pendingStreamTextRef = useRef('');
+  const pendingThinkingTextRef = useRef('');
+  const streamFlushTimeoutRef = useRef(null);
+
+  const flushAssistantStreamChunks = () => {
+    if (streamFlushTimeoutRef.current) {
+      window.clearTimeout(streamFlushTimeoutRef.current);
+      streamFlushTimeoutRef.current = null;
+    }
+
+    const streamText = pendingStreamTextRef.current;
+    const thinkingText = pendingThinkingTextRef.current;
+    pendingStreamTextRef.current = '';
+    pendingThinkingTextRef.current = '';
+
+    if (!streamText && !thinkingText) {
+      return;
+    }
+
+    setMessages(prev => {
+      const updated = [...prev];
+      const lastMsg = updated[updated.length - 1];
+      if (lastMsg && lastMsg.role === 'assistant') {
+        const modelNoticePrefix = lastMsg.modelNotice ? `${lastMsg.modelNotice}\n\n` : '';
+        const contentWithoutNotice = modelNoticePrefix
+          ? (lastMsg.content || '').replace(modelNoticePrefix, '')
+          : (lastMsg.content || '');
+
+        updated[updated.length - 1] = {
+          ...lastMsg,
+          thinking: `${lastMsg.thinking || ''}${thinkingText}`,
+          content: streamText
+            ? `${modelNoticePrefix}${contentWithoutNotice}${streamText}`
+            : lastMsg.content,
+          hasStarted: lastMsg.hasStarted || Boolean(streamText || thinkingText),
+          showLoading: streamText || thinkingText ? false : lastMsg.showLoading,
+        };
+      }
+      return updated;
+    });
+  };
+
+  const scheduleAssistantStreamFlush = () => {
+    if (streamFlushTimeoutRef.current) {
+      return;
+    }
+
+    streamFlushTimeoutRef.current = window.setTimeout(flushAssistantStreamChunks, 50);
+  };
+
+  const appendAssistantStreamChunk = (text) => {
+    pendingStreamTextRef.current += text;
+    scheduleAssistantStreamFlush();
+  };
+
+  const appendAssistantThinkingChunk = (text) => {
+    pendingThinkingTextRef.current += text;
+    scheduleAssistantStreamFlush();
+  };
 
   const replaceLastUploadStatus = (message) => {
     setMessages(prev => {
@@ -284,20 +355,8 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
             if (wsRef.current?.loadingTimeout) {
               clearTimeout(wsRef.current.loadingTimeout);
             }
-            
-            setMessages(prev => {
-              const updated = [...prev];
-              const lastMsg = updated[updated.length - 1];
-              if (lastMsg && lastMsg.role === 'assistant') {
-                updated[updated.length - 1] = {
-                  ...lastMsg,
-                  thinking: (lastMsg.thinking || '') + data.payload.text,
-                  hasStarted: true,
-                  showLoading: false,
-                };
-              }
-              return updated;
-            });
+
+            appendAssistantThinkingChunk(data.payload.text || '');
           } else if (data.type === 'model') {
             if (data.payload?.fallback && data.payload?.model) {
               onModelResolved?.(data.payload.model);
@@ -331,26 +390,15 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
             if (wsRef.current?.loadingTimeout) {
               clearTimeout(wsRef.current.loadingTimeout);
             }
-            
-            setMessages(prev => {
-              const updated = [...prev];
-              const lastMsg = updated[updated.length - 1];
-              if (lastMsg && lastMsg.role === 'assistant') {
-                updated[updated.length - 1] = {
-                  ...lastMsg,
-                  content: `${lastMsg.modelNotice ? `${lastMsg.modelNotice}\n\n` : ''}${(lastMsg.content || '').replace(`${lastMsg.modelNotice || ''}\n\n`, '')}${data.payload.text}`,
-                  hasStarted: true,
-                  showLoading: false,
-                };
-              }
-              return updated;
-            });
+
+            appendAssistantStreamChunk(data.payload.text || '');
           } else if (data.type === 'complete') {
             // Clear loading timeout
             if (wsRef.current?.loadingTimeout) {
               clearTimeout(wsRef.current.loadingTimeout);
             }
-            
+
+            flushAssistantStreamChunks();
             setMessages(prev => {
               const updated = [...prev];
               const lastMsg = updated[updated.length - 1];
@@ -367,6 +415,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
             setLoading(false);
           } else if (data.type === 'error') {
             console.error('Error from backend:', data.payload.error);
+            flushAssistantStreamChunks();
             setMessages(prev => {
               const updated = [...prev];
               const lastMsg = updated[updated.length - 1];
@@ -413,6 +462,9 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     connectWebSocket();
 
     return () => {
+      if (streamFlushTimeoutRef.current) {
+        window.clearTimeout(streamFlushTimeoutRef.current);
+      }
       if (wsRef.current) {
         console.log('Cleaning up WebSocket...');
         wsRef.current.close();
@@ -452,7 +504,9 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   }, [selectedContextCollections]);
 
   useEffect(() => {
-    messagesEndRef.current?.scrollIntoView({ behavior: 'smooth' });
+    if (shouldStickToBottomRef.current) {
+      scrollToBottom(messagesAreaRef.current);
+    }
   }, [messages]);
 
   useEffect(() => {
@@ -610,6 +664,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     persistSavedChats(nextChats);
     skipNextAutoSaveRef.current = true;
     setSavedChats(nextChats);
+    setMessages([]);
     setActiveSavedChatId('');
     setShowDeleteChatConfirm(false);
     showChatStatus('Saved chat deleted.');
@@ -649,6 +704,10 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     // Add user message and assistant placeholder atomically
     const userMessage = { role: 'user', content: text };
     const assistantPlaceholder = { role: 'assistant', content: '', showLoading: false, hasStarted: false };
+    flushAssistantStreamChunks();
+    pendingStreamTextRef.current = '';
+    pendingThinkingTextRef.current = '';
+    shouldStickToBottomRef.current = true;
     setMessages(prev => [...prev, userMessage, assistantPlaceholder]);
     setLoading(true);
 
@@ -707,6 +766,39 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
         return updated;
       });
     }
+  };
+
+  const handleMessagesScroll = (event) => {
+    shouldStickToBottomRef.current = isNearScrollBottom(event.currentTarget);
+  };
+
+  const handleMessagesWheel = (event) => {
+    if (event.deltaY < 0) {
+      shouldStickToBottomRef.current = false;
+      return;
+    }
+
+    if (event.deltaY > 0) {
+      shouldStickToBottomRef.current = isNearScrollBottom(event.currentTarget);
+    }
+  };
+
+  const handleMessagesTouchStart = (event) => {
+    lastTouchYRef.current = event.touches[0]?.clientY ?? null;
+  };
+
+  const handleMessagesTouchMove = (event) => {
+    const currentY = event.touches[0]?.clientY;
+    if (typeof currentY !== 'number' || typeof lastTouchYRef.current !== 'number') {
+      return;
+    }
+
+    if (currentY > lastTouchYRef.current) {
+      shouldStickToBottomRef.current = false;
+    } else if (currentY < lastTouchYRef.current) {
+      shouldStickToBottomRef.current = isNearScrollBottom(event.currentTarget);
+    }
+    lastTouchYRef.current = currentY;
   };
 
   const handleStopChat = () => {
@@ -1149,6 +1241,11 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       </div>
       <div
         className="messages-area"
+        ref={messagesAreaRef}
+        onScroll={handleMessagesScroll}
+        onWheel={handleMessagesWheel}
+        onTouchStart={handleMessagesTouchStart}
+        onTouchMove={handleMessagesTouchMove}
         onClick={() => setCollapseSourcesSignal(signal => signal + 1)}
       >
         {messages.length === 0 && (
@@ -1169,7 +1266,6 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
             collapseSourcesSignal={collapseSourcesSignal}
           />
         ))}
-        <div ref={messagesEndRef} />
       </div>
       <InputArea
         onSendMessage={handleSendMessage}
