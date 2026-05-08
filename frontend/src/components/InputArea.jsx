@@ -1,4 +1,4 @@
-import React, { useEffect, useRef, useState } from 'react';
+import React, { useEffect, useMemo, useRef, useState } from 'react';
 import './InputArea.css';
 
 const SUPPORTED_UPLOAD_ACCEPT = [
@@ -150,10 +150,10 @@ function InputArea({
 }) {
   const [input, setInput] = useState('');
   const [useWeaviateContext, setUseWeaviateContext] = useState(true);
-  const [showContextSettings, setShowContextSettings] = useState(true);
+  const [showContextSettings, setShowContextSettings] = useState(false);
   const [temperature, setTemperature] = useState('0.2');
-  const [topP, setTopP] = useState('0.85');
-  const [contextChars, setContextChars] = useState('12000');
+  const [topP, setTopP] = useState('0.95');
+  const [contextChars, setContextChars] = useState('32000');
   const [newCollectionName, setNewCollectionName] = useState('');
   const [showLibraryManager, setShowLibraryManager] = useState(false);
   const [selectedDeleteCollection, setSelectedDeleteCollection] = useState('');
@@ -162,6 +162,7 @@ function InputArea({
   const [libraryFiles, setLibraryFiles] = useState([]);
   const [libraryFilesLoading, setLibraryFilesLoading] = useState(false);
   const [libraryFilesError, setLibraryFilesError] = useState('');
+  const [libraryFileFilter, setLibraryFileFilter] = useState('');
   const [deletingFileId, setDeletingFileId] = useState('');
   const fileInputRef = useRef(null);
   const repoInputRef = useRef(null);
@@ -290,20 +291,45 @@ function InputArea({
     setContextChars(sanitizeIntegerSettingInput(event.target.value, CONTEXT_CHARS_BOUNDS));
   };
 
-  const collectionOptions = Array.from(
-    new Map(
-      [
-        ...collections,
-        ...(collections.length === 0 || collections.some(collection => collection.name === selectedUploadCollection)
-          ? [{ name: selectedUploadCollection || 'uploaded_files' }]
-          : []),
-      ]
-        .filter(collection => collection?.name)
-        .map(collection => [collection.name, collection])
-    ).values()
-  ).sort((left, right) => left.name.localeCompare(right.name));
+  const collectionOptions = useMemo(() => {
+    const activeCollections = Array.from(
+      new Map(
+        collections
+          .filter(collection => collection?.name)
+          .map(collection => [collection.name, collection])
+      ).values()
+    ).sort((left, right) => left.name.localeCompare(right.name));
+
+    if (activeCollections.length) {
+      return activeCollections;
+    }
+
+    return [{ name: selectedUploadCollection || 'uploaded_files' }];
+  }, [collections, selectedUploadCollection]);
   const deleteCollectionName = selectedDeleteCollection || collectionOptions[0]?.name || '';
-  const manageCollectionName = selectedManageCollection || collectionOptions[0]?.name || '';
+  const selectedManageCollectionExists = collectionOptions.some(
+    collection => collection.name === selectedManageCollection
+  );
+  const preferredManageCollection = collectionOptions.find(
+    collection => collection.name === selectedUploadCollection
+  )?.name || collectionOptions[0]?.name || '';
+  const manageCollectionName = selectedManageCollectionExists
+    ? selectedManageCollection
+    : preferredManageCollection;
+  const normalizedLibraryFileFilter = libraryFileFilter.trim().toLowerCase();
+  const filteredLibraryFiles = normalizedLibraryFileFilter
+    ? libraryFiles.filter((file) => (
+        [
+          file.filePath,
+          file.fileName,
+          file.mimeType,
+        ]
+          .filter(Boolean)
+          .join(' ')
+          .toLowerCase()
+          .includes(normalizedLibraryFileFilter)
+      ))
+    : libraryFiles;
 
   useEffect(() => {
     if (selectedDeleteCollection && !collectionOptions.some(collection => collection.name === selectedDeleteCollection)) {
@@ -312,11 +338,11 @@ function InputArea({
   }, [collectionOptions, selectedDeleteCollection]);
 
   useEffect(() => {
-    if (!manageCollectionName || collectionOptions.some(collection => collection.name === selectedManageCollection)) {
+    if (!manageCollectionName || selectedManageCollection === manageCollectionName) {
       return;
     }
     setSelectedManageCollection(manageCollectionName);
-  }, [collectionOptions, manageCollectionName, selectedManageCollection]);
+  }, [manageCollectionName, selectedManageCollection]);
 
   useEffect(() => {
     if (showLibraryManager) {
@@ -332,6 +358,38 @@ function InputArea({
 
   return (
     <form className="input-area" onSubmit={handleSubmit}>
+      <div className="input-wrapper">
+        <textarea
+          className="input-field"
+          value={input}
+          onChange={(e) => setInput(e.target.value)}
+          onKeyDown={handleKeyDown}
+          placeholder={
+            disabled ? 'Connecting to backend...' : 'Type your message... (Shift+Enter for new line)'
+          }
+          disabled={disabled}
+          rows="1"
+        />
+        <button
+          type="submit"
+          className="send-button"
+          disabled={disabled || !input.trim() || loading || uploadLoading}
+          title="Send message (Enter)"
+        >
+          Send
+        </button>
+        {loading && (
+          <button
+            type="button"
+            className="stop-button"
+            onClick={onStopChat}
+            disabled={uploadLoading}
+            title="Stop current response"
+          >
+            Stop
+          </button>
+        )}
+      </div>
       <div className={`context-library ${showContextSettings ? '' : 'collapsed'}`}>
         <div className="context-library-header">
           <label className="context-toggle">
@@ -342,6 +400,19 @@ function InputArea({
             />
             Use expert libraries
           </label>
+          <div className="context-library-list">
+            {collectionOptions.map(collection => (
+              <label key={collection.name} className="context-library-option">
+                <input
+                  type="checkbox"
+                  checked={selectedContextCollections.includes(collection.name)}
+                  onChange={(event) => handleContextCollectionToggle(collection.name, event.target.checked)}
+                  disabled={!useWeaviateContext || collectionLoading}
+                />
+                <span>{collection.name}</span>
+              </label>
+            ))}
+          </div>
           <div className="context-library-actions">
             <span className="context-summary">{contextSummary}</span>
             <button
@@ -351,7 +422,7 @@ function InputArea({
               aria-expanded={showContextSettings}
               title="Show or hide expert and model settings"
             >
-              {showContextSettings ? 'Collapse' : 'Expand'}
+              Settings
             </button>
             <button
               type="button"
@@ -366,19 +437,6 @@ function InputArea({
         </div>
         {showContextSettings && (
           <>
-            <div className="context-library-list">
-              {collectionOptions.map(collection => (
-                <label key={collection.name} className="context-library-option">
-                  <input
-                    type="checkbox"
-                    checked={selectedContextCollections.includes(collection.name)}
-                    onChange={(event) => handleContextCollectionToggle(collection.name, event.target.checked)}
-                    disabled={!useWeaviateContext || collectionLoading}
-                  />
-                  <span>{collection.name}</span>
-                </label>
-              ))}
-            </div>
             <div className="model-settings">
               <label className="model-setting">
                 <span>Temperature</span>
@@ -465,6 +523,7 @@ function InputArea({
                   value={manageCollectionName}
                   onChange={(event) => {
                     setSelectedManageCollection(event.target.value);
+                    setLibraryFileFilter('');
                     onUploadCollectionChange(event.target.value);
                   }}
                   disabled={uploadDisabled || uploadLoading || collectionLoading}
@@ -513,16 +572,32 @@ function InputArea({
             </div>
             <div className="library-files">
               <div className="library-files-header">
-                <span>Files</span>
+                <span>
+                  Files
+                  {libraryFileFilter.trim() && !libraryFilesLoading
+                    ? ` (${filteredLibraryFiles.length}/${libraryFiles.length})`
+                    : ''}
+                </span>
+                <input
+                  type="search"
+                  className="library-file-search"
+                  value={libraryFileFilter}
+                  onChange={(event) => setLibraryFileFilter(event.target.value)}
+                  placeholder="Search files"
+                  aria-label="Search files in selected expert library"
+                  disabled={libraryFilesLoading || libraryFiles.length === 0}
+                />
                 {libraryFilesError && <span className="library-files-error">{libraryFilesError}</span>}
               </div>
               {libraryFilesLoading ? (
                 <div className="library-files-empty">Loading files...</div>
               ) : libraryFiles.length === 0 ? (
                 <div className="library-files-empty">No files in this library.</div>
+              ) : filteredLibraryFiles.length === 0 ? (
+                <div className="library-files-empty">No files match this search.</div>
               ) : (
                 <div className="library-files-list">
-                  {libraryFiles.map(file => (
+                  {filteredLibraryFiles.map(file => (
                     <div key={file.id} className="library-file-row">
                       <div className="library-file-main">
                         <span className="library-file-name">{file.filePath || file.fileName}</span>
@@ -605,38 +680,6 @@ function InputArea({
           </div>
         </div>
       )}
-      <div className="input-wrapper">
-        <textarea
-          className="input-field"
-          value={input}
-          onChange={(e) => setInput(e.target.value)}
-          onKeyDown={handleKeyDown}
-          placeholder={
-            disabled ? 'Connecting to backend...' : 'Type your message... (Shift+Enter for new line)'
-          }
-          disabled={disabled}
-          rows="1"
-        />
-        <button
-          type="submit"
-          className="send-button"
-          disabled={disabled || !input.trim() || loading || uploadLoading}
-          title="Send message (Enter)"
-        >
-          Send
-        </button>
-        {loading && (
-          <button
-            type="button"
-            className="stop-button"
-            onClick={onStopChat}
-            disabled={uploadLoading}
-            title="Stop current response"
-          >
-            Stop
-          </button>
-        )}
-      </div>
     </form>
   );
 }

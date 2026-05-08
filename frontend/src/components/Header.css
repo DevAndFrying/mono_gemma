@@ -1,114 +1,18 @@
 .header {
   background-color: var(--color-surface);
   border-bottom: 1px solid var(--color-surface-light);
-  padding: 0.5rem 1rem;
+  padding: 0.35rem 1rem;
   box-shadow: 0 1px 4px rgba(0, 0, 0, 0.22);
 }
 
 .header-content {
   display: flex;
-  justify-content: space-between;
   align-items: center;
   max-width: 100%;
 }
 
 .header-title h1 {
-  font-size: 1.1rem;
+  font-size: 0.95rem;
   line-height: 1.2;
-  margin-bottom: 0.125rem;
-}
-
-.header-status {
-  display: flex;
-  align-items: center;
-  gap: 0.5rem;
-}
-
-.model-picker {
-  display: flex;
-  align-items: center;
-  gap: 0.375rem;
-  flex-wrap: wrap;
-  color: var(--color-text-muted);
-  font-size: 0.75rem;
-}
-
-.model-picker select {
-  height: 28px;
-  min-width: 160px;
-  max-width: 240px;
-  padding: 0 0.5rem;
-  background-color: var(--color-bg);
-  color: var(--color-text);
-  border: 1px solid var(--color-surface-light);
-  border-radius: 0.5rem;
-  font-family: inherit;
-  font-size: 0.75rem;
-}
-
-.model-picker select:focus {
-  outline: none;
-  border-color: var(--color-primary);
-  box-shadow: 0 0 0 2px rgba(59, 130, 246, 0.1);
-}
-
-.model-picker select:disabled {
-  color: var(--color-text-muted);
-  cursor: not-allowed;
-}
-
-.model-picker-note {
-  color: #f59e0b;
-  font-size: 0.7rem;
-  white-space: nowrap;
-}
-
-.status-indicator {
-  display: flex;
-  align-items: center;
-  gap: 0.35rem;
-  min-height: 28px;
-  padding: 0 0.55rem;
-  border-radius: 0.5rem;
-  background-color: var(--color-surface-light);
-  font-size: 0.75rem;
-}
-
-.status-indicator.connected {
-  color: var(--color-accent);
-}
-
-.status-indicator.disconnected {
-  color: #ef4444;
-}
-
-.status-dot {
-  display: inline-block;
-  width: 0.4rem;
-  height: 0.4rem;
-  border-radius: 50%;
-  background-color: currentColor;
-  animation: pulse 2s infinite;
-}
-
-@media (max-width: 720px) {
-  .header-content {
-    align-items: flex-start;
-    flex-direction: column;
-    gap: 0.5rem;
-  }
-
-  .header-status {
-    flex-wrap: wrap;
-  }
-}
-
-@keyframes pulse {
-  0%,
-  100% {
-    opacity: 1;
-  }
-  50% {
-    opacity: 0.5;
-  }
+  margin: 0;
 }

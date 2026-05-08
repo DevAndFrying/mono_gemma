@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import weaviate from 'weaviate-ts-client';
+import pg from 'pg';
 
 dotenv.config();
 
@@ -21,14 +22,14 @@ const wss = new WebSocketServer({
 
 // Configuration
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-const MODEL_NAME = process.env.MODEL_NAME || 'gemma4:e4b';
+const MODEL_NAME = process.env.MODEL_NAME || 'gemma4:26b';
 const API_PORT = process.env.API_PORT || 3000;
 const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
 const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'uploaded_files';
 const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 20 * 1024 * 1024);
 const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 12);
-const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 12000);
+const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 32000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
 const WEAVIATE_PQ_TRAINING_LIMIT = Number(process.env.WEAVIATE_PQ_TRAINING_LIMIT || 50000);
 const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 1800);
@@ -43,11 +44,25 @@ const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLo
 const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
-const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma4:e4b,gemma4:26b,gemma4:31b')
+const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma4:26b,gemma4:e4b,gemma4:31b')
   .split(',')
   .map((model) => model.trim())
   .filter(Boolean);
 const weaviateUrl = new URL(WEAVIATE_URL);
+const { Pool } = pg;
+const DATABASE_URL = process.env.DATABASE_URL?.trim();
+const databaseUrlPassword = DATABASE_URL ? new URL(DATABASE_URL).password : '';
+const postgresPassword = String(process.env.PGPASSWORD || databaseUrlPassword || 'mcp_dev_password');
+const postgresPoolConfig = DATABASE_URL
+  ? { connectionString: DATABASE_URL, password: postgresPassword }
+  : {
+      host: process.env.PGHOST || 'localhost',
+      port: Number(process.env.PGPORT || 5432),
+      database: process.env.PGDATABASE || 'mcp_gemma',
+      user: process.env.PGUSER || 'mcp',
+      password: postgresPassword,
+    };
+const postgresPool = new Pool(postgresPoolConfig);
 
 // Initialize Weaviate client
 const weaviateClient = weaviate.client({
@@ -114,11 +129,129 @@ type OllamaModel = {
 };
 
 let ollamaModelCache: { models: string[]; expiresAt: number } | null = null;
+let databaseReadyPromise: Promise<void> | null = null;
 
 const errorMessage = (error: unknown) => error instanceof Error ? error.message : String(error);
 const errorStack = (error: unknown) => error instanceof Error ? error.stack : undefined;
 const isConnectionRefused = (error: unknown) => errorMessage(error).includes('ECONNREFUSED');
 const sleep = (ms: number) => new Promise((resolve) => setTimeout(resolve, ms));
+const normalizeAskedQuestion = (question: unknown) => (
+  typeof question === 'string'
+    ? question.replace(/\s+/g, ' ').trim().toLowerCase()
+    : ''
+);
+const createChatId = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const validateChatMessages = (messages: unknown) => {
+  if (!Array.isArray(messages)) {
+    throw new Error('Chat messages must be an array.');
+  }
+
+  return messages.map((message) => {
+    if (!message || typeof message !== 'object') {
+      throw new Error('Each chat message must be an object.');
+    }
+    const role = (message as { role?: unknown }).role;
+    const content = (message as { content?: unknown }).content;
+    if (typeof role !== 'string' || !role.trim()) {
+      throw new Error('Each chat message must include a role.');
+    }
+    if (typeof content !== 'string') {
+      throw new Error('Each chat message must include string content.');
+    }
+    return message;
+  });
+};
+const ensureDatabase = async () => {
+  if (!databaseReadyPromise) {
+    databaseReadyPromise = (async () => {
+      await postgresPool.query(`
+        CREATE TABLE IF NOT EXISTS saved_chats (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          model TEXT,
+          messages JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await postgresPool.query(`
+        CREATE TABLE IF NOT EXISTS top_asked_questions (
+          normalized_question TEXT PRIMARY KEY,
+          display_question TEXT NOT NULL,
+          ask_count INTEGER NOT NULL DEFAULT 1,
+          first_asked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          last_asked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+      await postgresPool.query(`
+        CREATE INDEX IF NOT EXISTS top_asked_questions_count_idx
+        ON top_asked_questions (ask_count DESC, last_asked_at DESC);
+      `);
+    })().catch((error) => {
+      databaseReadyPromise = null;
+      throw error;
+    });
+  }
+
+  return databaseReadyPromise;
+};
+const toSavedChat = (row: any) => ({
+  id: row.id,
+  title: row.title,
+  model: row.model,
+  messages: row.messages,
+  createdAt: row.created_at,
+  updatedAt: row.updated_at,
+});
+const upsertSavedChat = async ({ id, title, model, messages }: {
+  id?: string;
+  title: string;
+  model?: string;
+  messages: unknown[];
+}) => {
+  await ensureDatabase();
+  const chatId = typeof id === 'string' && id.trim() ? id.trim() : createChatId();
+  const result = await postgresPool.query(
+    `
+      INSERT INTO saved_chats (id, title, model, messages)
+      VALUES ($1, $2, $3, $4::jsonb)
+      ON CONFLICT (id) DO UPDATE SET
+        title = EXCLUDED.title,
+        model = EXCLUDED.model,
+        messages = EXCLUDED.messages,
+        updated_at = now()
+      RETURNING id, title, model, messages, created_at, updated_at;
+    `,
+    [chatId, title, model || null, JSON.stringify(messages)]
+  );
+  return toSavedChat(result.rows[0]);
+};
+const recordAskedQuestion = async (question: unknown) => {
+  const displayQuestion = typeof question === 'string' ? question.replace(/\s+/g, ' ').trim() : '';
+  const normalizedQuestion = normalizeAskedQuestion(displayQuestion);
+  if (!normalizedQuestion) {
+    return;
+  }
+
+  await ensureDatabase();
+  await postgresPool.query(
+    `
+      INSERT INTO top_asked_questions (normalized_question, display_question)
+      VALUES ($1, $2)
+      ON CONFLICT (normalized_question) DO UPDATE SET
+        display_question = EXCLUDED.display_question,
+        ask_count = top_asked_questions.ask_count + 1,
+        last_asked_at = now();
+    `,
+    [normalizedQuestion, displayQuestion]
+  );
+};
+const trackAskedQuestionMiddleware = (req: Request, res: Response, next: NextFunction) => {
+  recordAskedQuestion(req.body?.message).catch((error) => {
+    console.error('Question analytics error:', errorMessage(error));
+  });
+  next();
+};
 const isTransientWeaviateVectorizerError = (error: unknown) => {
   const message = errorMessage(error);
   return [
@@ -373,11 +506,11 @@ const clampNumber = (value: unknown, fallback: number, min: number, max: number)
 
 const normalizeGenerationOptions = (options: { temperature?: unknown; top_p?: unknown } = {}) => ({
   temperature: clampNumber(options.temperature, 0.2, 0, 1),
-  top_p: clampNumber(options.top_p, 0.85, 0.05, 1),
+  top_p: clampNumber(options.top_p, 0.95, 0.05, 1),
 });
 
 const normalizeContextOptions = (options: { contextChars?: unknown; contextResults?: unknown } = {}) => ({
-  contextChars: Math.round(clampNumber(options.contextChars, WEAVIATE_CONTEXT_CHARS, 1000, 24000)),
+  contextChars: Math.round(clampNumber(options.contextChars, WEAVIATE_CONTEXT_CHARS, 1000, 64000)),
   contextResults: Math.round(clampNumber(options.contextResults, WEAVIATE_CONTEXT_RESULTS, 1, 12)),
 });
 
@@ -1389,6 +1522,9 @@ wss.on('connection', (ws: any, req: any) => {
         const generationOptions = normalizeGenerationOptions(payload);
         const contextOptions = normalizeContextOptions(payload);
         console.log('👤 User message:', text);
+        recordAskedQuestion(text).catch((error) => {
+          console.error('Question analytics error:', errorMessage(error));
+        });
 
         stopActiveStream(ws, 'Superseded by a new request');
         const activeStream: ActiveOllamaStream = {
@@ -1618,6 +1754,135 @@ app.get('/api/health', (req, res) => {
   res.json({ status: 'ok', model: MODEL_NAME });
 });
 
+app.get('/api/chats', async (req, res) => {
+  try {
+    await ensureDatabase();
+    const result = await postgresPool.query(`
+      SELECT id, title, model, messages, created_at, updated_at
+      FROM saved_chats
+      ORDER BY updated_at DESC
+      LIMIT 100;
+    `);
+    res.json({ chats: result.rows.map(toSavedChat) });
+  } catch (error) {
+    console.error('Saved chat list error:', errorMessage(error));
+    res.status(500).json({ error: `Failed to load saved chats: ${errorMessage(error)}` });
+  }
+});
+
+app.post('/api/chats', async (req, res) => {
+  try {
+    const messages = validateChatMessages(req.body?.messages);
+    const title = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.replace(/\s+/g, ' ').trim()
+      : 'Untitled chat';
+    const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
+    const chat = await upsertSavedChat({
+      id: req.body?.id,
+      title,
+      model,
+      messages,
+    });
+    res.json({ chat });
+  } catch (error) {
+    console.error('Saved chat write error:', errorMessage(error));
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
+app.put('/api/chats/:id', async (req, res) => {
+  try {
+    const messages = validateChatMessages(req.body?.messages);
+    const title = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.replace(/\s+/g, ' ').trim()
+      : 'Untitled chat';
+    const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
+    const chat = await upsertSavedChat({
+      id: req.params.id,
+      title,
+      model,
+      messages,
+    });
+    res.json({ chat });
+  } catch (error) {
+    console.error('Saved chat update error:', errorMessage(error));
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
+app.patch('/api/chats/:id', async (req, res) => {
+  try {
+    await ensureDatabase();
+    const title = typeof req.body?.title === 'string' && req.body.title.trim()
+      ? req.body.title.replace(/\s+/g, ' ').trim()
+      : '';
+    if (!title) {
+      res.status(400).json({ error: 'A chat title is required.' });
+      return;
+    }
+
+    const result = await postgresPool.query(
+      `
+        UPDATE saved_chats
+        SET title = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING id, title, model, messages, created_at, updated_at;
+      `,
+      [req.params.id, title]
+    );
+    if (result.rowCount === 0) {
+      res.status(404).json({ error: 'Saved chat not found.' });
+      return;
+    }
+    res.json({ chat: toSavedChat(result.rows[0]) });
+  } catch (error) {
+    console.error('Saved chat rename error:', errorMessage(error));
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
+app.delete('/api/chats/:id', async (req, res) => {
+  try {
+    await ensureDatabase();
+    const result = await postgresPool.query('DELETE FROM saved_chats WHERE id = $1 RETURNING id;', [req.params.id]);
+    if (result.rowCount === 0) {
+      res.status(404).json({ error: 'Saved chat not found.' });
+      return;
+    }
+    res.json({ deleted: req.params.id });
+  } catch (error) {
+    console.error('Saved chat delete error:', errorMessage(error));
+    res.status(400).json({ error: errorMessage(error) });
+  }
+});
+
+app.get('/api/questions/top', async (req, res) => {
+  try {
+    await ensureDatabase();
+    const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+    const result = await postgresPool.query(
+      `
+        SELECT display_question, ask_count, first_asked_at, last_asked_at
+        FROM top_asked_questions
+        ORDER BY ask_count DESC, last_asked_at DESC
+        LIMIT $1;
+      `,
+      [limit]
+    );
+    res.json({
+      questions: result.rows.map(row => ({
+        question: row.display_question,
+        count: row.ask_count,
+        firstAskedAt: row.first_asked_at,
+        lastAskedAt: row.last_asked_at,
+      })),
+    });
+  } catch (error) {
+    console.error('Top questions error:', errorMessage(error));
+    res.status(500).json({ error: `Failed to load top questions: ${errorMessage(error)}` });
+  }
+});
+
 app.get('/api/weaviate/health', async (req, res) => {
   try {
     const ready = await weaviateClient.misc.readyChecker().do();
@@ -1843,7 +2108,7 @@ app.delete('/api/weaviate/collections/:className/files/:id', async (req, res) =>
   }
 });
 
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', trackAskedQuestionMiddleware, async (req, res) => {
   try {
     const { message, className, classNames, model, useWeaviateContext = true } = req.body;
     const generationOptions = normalizeGenerationOptions(req.body);

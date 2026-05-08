@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import './App.css';
 import Chat from './components/Chat';
-import Header from './components/Header';
 
 function App() {
   const [connected, setConnected] = useState(false);
@@ -64,19 +63,14 @@ function App() {
 
   return (
     <div className="app">
-      <Header
-        connected={connected}
-        modelOptions={modelOptions}
-        selectedModel={selectedModel}
-        onModelChange={setSelectedModel}
-        installedModels={installedModels}
-        weaviateInfo={weaviateInfo}
-      />
       <main className="app-main">
         <Chat
           connected={connected}
+          modelOptions={modelOptions}
           selectedModel={selectedModel}
+          onModelChange={setSelectedModel}
           onModelResolved={setSelectedModel}
+          installedModels={installedModels}
           weaviateInfo={weaviateInfo}
         />
       </main>

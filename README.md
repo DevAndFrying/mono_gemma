@@ -111,7 +111,7 @@ MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
 
 ## AWS G6e GPU Setup
 
-`g6e.xlarge` has 1 NVIDIA L40S GPU with 48 GB GPU memory, 4 vCPUs, and 32 GiB instance memory. That is enough GPU memory for this stack's default `gemma4:e4b` and many larger quantized Ollama models.
+`g6e.xlarge` has 1 NVIDIA L40S GPU with 48 GB GPU memory, 4 vCPUs, and 32 GiB instance memory. That is enough GPU memory for this stack's default `gemma4:26b` and many larger quantized Ollama models.
 
 Recommended EC2 setup:
 
@@ -151,7 +151,7 @@ Validate CUDA/GPU access:
 ```bash
 nvidia-smi
 docker run --rm --gpus all nvidia/cuda:12.0.0-runtime-ubuntu22.04 nvidia-smi
-docker exec -it mcp-ollama ollama pull gemma4:e4b
+docker exec -it mcp-ollama ollama pull gemma4:26b
 docker exec -it mcp-ollama ollama ps
 ```
 
@@ -182,8 +182,8 @@ docker exec -it mcp-ollama ollama list
 Default/suggested models are controlled with:
 
 ```env
-MODEL_NAME=gemma4:e4b
-SUGGESTED_MODELS=gemma4:e4b,gemma4:26b,gemma4:31b
+MODEL_NAME=gemma4:26b
+SUGGESTED_MODELS=gemma4:26b,gemma4:e4b,gemma4:31b
 ```
 
 If you select a model that is not installed, the backend falls back to an installed model and the UI shows what was used.
@@ -194,7 +194,7 @@ For local dev, create or edit `backend/.env`:
 
 ```env
 OLLAMA_BASE_URL=http://localhost:11434
-MODEL_NAME=gemma4:e4b
+MODEL_NAME=gemma4:26b
 API_PORT=3002
 MCP_PORT=3001
 WEAVIATE_URL=http://localhost:8080
@@ -207,7 +207,7 @@ PGPASSWORD=mcp_dev_password
 WEAVIATE_ENABLE_PQ=false
 WEAVIATE_PQ_TRAINING_LIMIT=50000
 WEAVIATE_CONTEXT_RESULTS=12
-WEAVIATE_CONTEXT_CHARS=12000
+WEAVIATE_CONTEXT_CHARS=32000
 WEAVIATE_RERANK_CANDIDATE_MULTIPLIER=2
 WEAVIATE_SEARCH_MAX_CANDIDATES=24
 WEAVIATE_SEARCH_MODE=hybrid
@@ -220,7 +220,7 @@ WEAVIATE_UPLOAD_CHUNK_RETRIES=3
 MAX_UPLOAD_FILE_BYTES=20971520
 OLLAMA_MODEL_CACHE_MS=30000
 OLLAMA_KEEP_ALIVE=10m
-SUGGESTED_MODELS=gemma4:e4b,gemma4:26b,gemma4:31b
+SUGGESTED_MODELS=gemma4:26b,gemma4:e4b,gemma4:31b
 NODE_ENV=development
 ```
 
@@ -302,7 +302,7 @@ Tune how much Weaviate context is retrieved:
 
 ```env
 WEAVIATE_CONTEXT_RESULTS=12
-WEAVIATE_CONTEXT_CHARS=12000
+WEAVIATE_CONTEXT_CHARS=32000
 WEAVIATE_RERANK_CANDIDATE_MULTIPLIER=2
 WEAVIATE_SEARCH_MAX_CANDIDATES=24
 WEAVIATE_SEARCH_MODE=hybrid
@@ -313,7 +313,7 @@ For more information per answer:
 
 ```env
 WEAVIATE_CONTEXT_RESULTS=12
-WEAVIATE_CONTEXT_CHARS=20000
+WEAVIATE_CONTEXT_CHARS=32000
 WEAVIATE_SEARCH_MODE=both
 ```
 
@@ -345,14 +345,20 @@ They do not open arbitrary local filesystem paths directly, because browsers blo
 
 - **Stop** closes the active WebSocket stream, marks the partial answer complete, and reconnects for the next message.
 - **Temperature**, **Top P**, and **Context chars** tune generation and retrieved-context budget per message.
-- **Save chat** stores the current chat in browser `localStorage`.
-- **Saved chats** loads a previously saved local chat.
+- **Save chat** stores the current chat in PostgreSQL.
+- **Saved chats** loads a previously saved chat from PostgreSQL.
 - **Rename chat** renames the selected saved chat.
 - **Delete selected chat** removes the selected saved chat.
 - **Export MD** downloads the current chat as Markdown.
 - **Export JSON** downloads the full chat state, including RAG source metadata.
 
-Saved chats are local to the browser/profile. They are not stored in the backend.
+On first load after upgrading, existing browser `localStorage` chats are migrated into PostgreSQL if the server has no saved chats yet.
+
+The backend also tracks repeated user questions in PostgreSQL. View the most common prompts with:
+
+```text
+GET /api/questions/top?limit=20
+```
 
 ## Dropping Or Cleaning Weaviate
 

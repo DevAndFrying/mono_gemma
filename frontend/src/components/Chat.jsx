@@ -140,6 +140,52 @@ const readJsonResponse = async (response) => {
   }
 };
 
+const fetchSavedChats = async () => {
+  const response = await fetch('/api/chats');
+  const data = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to load saved chats.');
+  }
+  return Array.isArray(data.chats) ? data.chats : [];
+};
+
+const saveChatToServer = async (chat) => {
+  const response = await fetch(chat.id ? `/api/chats/${encodeURIComponent(chat.id)}` : '/api/chats', {
+    method: chat.id ? 'PUT' : 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(chat),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to save chat.');
+  }
+  return data.chat;
+};
+
+const renameChatOnServer = async (chatId, title) => {
+  const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ title }),
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to rename chat.');
+  }
+  return data.chat;
+};
+
+const deleteChatFromServer = async (chatId) => {
+  const response = await fetch(`/api/chats/${encodeURIComponent(chatId)}`, {
+    method: 'DELETE',
+  });
+  const data = await readJsonResponse(response);
+  if (!response.ok) {
+    throw new Error(data.error || 'Failed to delete chat.');
+  }
+  return data;
+};
+
 const downloadFile = (filename, content, type) => {
   const blob = new Blob([content], { type });
   const url = URL.createObjectURL(blob);
@@ -187,33 +233,59 @@ const scrollToBottom = (element) => {
   }
 };
 
-function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
+function Chat({
+  connected,
+  modelOptions = [],
+  selectedModel,
+  onModelChange,
+  onModelResolved,
+  installedModels = [],
+  weaviateInfo,
+}) {
   const [messages, setMessages] = useState([]);
-  const [savedChats, setSavedChats] = useState(() => loadSavedChats());
+  const [savedChats, setSavedChats] = useState([]);
   const [activeSavedChatId, setActiveSavedChatId] = useState('');
   const [chatStatus, setChatStatus] = useState('');
   const [loading, setLoading] = useState(false);
   const [uploading, setUploading] = useState(false);
   const [collapseSourcesSignal, setCollapseSourcesSignal] = useState(0);
-  const [showDeleteChatConfirm, setShowDeleteChatConfirm] = useState(false);
+  const [showSavedChatActions, setShowSavedChatActions] = useState(false);
+  const [showSavedChatsSidebar, setShowSavedChatsSidebar] = useState(true);
+  const [savedChatsSidebarWidth, setSavedChatsSidebarWidth] = useState(260);
   const [collections, setCollections] = useState([]);
   const [collectionLoading, setCollectionLoading] = useState(false);
   const [selectedUploadCollection, setSelectedUploadCollection] = useState(() => loadStoredString(UPLOAD_COLLECTION_STORAGE_KEY, DEFAULT_WEAVIATE_COLLECTION));
   const [selectedContextCollections, setSelectedContextCollections] = useState(() => loadStoredArray(SELECTED_CONTEXT_COLLECTIONS_STORAGE_KEY, [DEFAULT_WEAVIATE_COLLECTION]));
   const [wsConnected, setWsConnected] = useState(false);
+  const weaviateReady = weaviateInfo?.status === 'ready';
+  const installedModelSet = new Set(installedModels || []);
   const wsRef = useRef(null);
-  const deleteChatConfirmRef = useRef(null);
+  const savedChatActionsRef = useRef(null);
   const messagesAreaRef = useRef(null);
   const hasShownModelLoadingRef = useRef(false);
   const chatStatusTimeoutRef = useRef(null);
   const autoSaveTimeoutRef = useRef(null);
   const skipNextAutoSaveRef = useRef(false);
   const reconnectAfterCloseRef = useRef(false);
+  const activeSavedChatIdRef = useRef('');
+  const savedChatsRef = useRef([]);
   const shouldStickToBottomRef = useRef(true);
   const lastTouchYRef = useRef(null);
   const pendingStreamTextRef = useRef('');
   const pendingThinkingTextRef = useRef('');
   const streamFlushTimeoutRef = useRef(null);
+  const hasInitializedContextCollectionsRef = useRef(false);
+  const sidebarResizeRef = useRef({ resizing: false, startX: 0, startWidth: 260 });
+
+  const startSavedChatsSidebarResize = (event) => {
+    event.preventDefault();
+    sidebarResizeRef.current = {
+      resizing: true,
+      startX: event.clientX,
+      startWidth: savedChatsSidebarWidth,
+    };
+    document.body.classList.add('resizing-saved-chats-sidebar');
+  };
 
   const flushAssistantStreamChunks = () => {
     if (streamFlushTimeoutRef.current) {
@@ -310,6 +382,11 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       setCollections(activeCollections);
       setSelectedUploadCollection(current => (current && activeNames.has(current) ? current : fallbackCollection));
       setSelectedContextCollections(current => {
+        if (!hasInitializedContextCollectionsRef.current && activeCollections.length > 0) {
+          hasInitializedContextCollectionsRef.current = true;
+          return activeCollections.map(collection => collection.name);
+        }
+
         const validSelections = current.filter(name => activeNames.has(name));
         if (validSelections.length) {
           return validSelections;
@@ -473,11 +550,101 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   }, []);
 
   useEffect(() => {
+    const handlePointerMove = (event) => {
+      if (!sidebarResizeRef.current.resizing) {
+        return;
+      }
+
+      const delta = event.clientX - sidebarResizeRef.current.startX;
+      const nextWidth = Math.min(460, Math.max(30, sidebarResizeRef.current.startWidth + delta));
+      setSavedChatsSidebarWidth(nextWidth);
+    };
+
+    const stopResize = () => {
+      if (!sidebarResizeRef.current.resizing) {
+        return;
+      }
+      sidebarResizeRef.current.resizing = false;
+      document.body.classList.remove('resizing-saved-chats-sidebar');
+    };
+
+    window.addEventListener('pointermove', handlePointerMove);
+    window.addEventListener('pointerup', stopResize);
+    window.addEventListener('pointercancel', stopResize);
+
+    return () => {
+      window.removeEventListener('pointermove', handlePointerMove);
+      window.removeEventListener('pointerup', stopResize);
+      window.removeEventListener('pointercancel', stopResize);
+      document.body.classList.remove('resizing-saved-chats-sidebar');
+    };
+  }, []);
+
+  useEffect(() => {
+    let cancelled = false;
+
+    const loadServerChats = async () => {
+      try {
+        const serverChats = await fetchSavedChats();
+        if (cancelled) {
+          return;
+        }
+
+        if (serverChats.length > 0) {
+          setSavedChats(serverChats);
+          return;
+        }
+
+        const legacyChats = loadSavedChats();
+        if (legacyChats.length === 0) {
+          setSavedChats([]);
+          return;
+        }
+
+        const migratedChats = [];
+        for (const legacyChat of legacyChats.slice(0, 50)) {
+          try {
+            const savedChat = await saveChatToServer({
+              id: legacyChat.id,
+              title: legacyChat.title || createChatTitle(legacyChat.messages || []),
+              model: legacyChat.model,
+              messages: legacyChat.messages || [],
+            });
+            migratedChats.push(savedChat);
+          } catch (error) {
+            console.error('Failed to migrate saved chat:', error);
+          }
+        }
+
+        if (!cancelled) {
+          setSavedChats(migratedChats);
+          if (migratedChats.length > 0) {
+            localStorage.removeItem(SAVED_CHATS_STORAGE_KEY);
+          }
+        }
+      } catch (error) {
+        console.error('Failed to load saved chats:', error);
+        if (!cancelled) {
+          setSavedChats(loadSavedChats());
+          showChatStatus(error.message);
+        }
+      }
+    };
+
+    loadServerChats();
+
+    return () => {
+      cancelled = true;
+    };
+  }, []);
+
+  useEffect(() => {
     refreshCollections();
   }, [weaviateInfo?.status]);
 
   useEffect(() => {
     if (weaviateInfo?.status !== 'ready') {
+      hasInitializedContextCollectionsRef.current = false;
       setCollections([]);
       setSelectedContextCollections([]);
       return undefined;
@@ -510,19 +677,19 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   }, [messages]);
 
   useEffect(() => {
-    if (!showDeleteChatConfirm) {
+    if (!showSavedChatActions) {
       return undefined;
     }
 
     const handlePointerDown = (event) => {
-      if (!deleteChatConfirmRef.current?.contains(event.target)) {
-        setShowDeleteChatConfirm(false);
+      if (!savedChatActionsRef.current?.contains(event.target)) {
+        setShowSavedChatActions(false);
       }
     };
 
     const handleKeyDown = (event) => {
       if (event.key === 'Escape') {
-        setShowDeleteChatConfirm(false);
+        setShowSavedChatActions(false);
       }
     };
 
@@ -533,7 +700,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       document.removeEventListener('pointerdown', handlePointerDown);
       document.removeEventListener('keydown', handleKeyDown);
     };
-  }, [showDeleteChatConfirm]);
+  }, [showSavedChatActions]);
 
   useEffect(() => {
     window.clearTimeout(autoSaveTimeoutRef.current);
@@ -546,11 +713,19 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     }
 
     autoSaveTimeoutRef.current = window.setTimeout(() => {
-      saveChatSnapshot(messages);
+      saveChatSnapshot(messages, { reportErrors: true });
     }, AUTO_SAVE_DELAY_MS);
 
     return () => window.clearTimeout(autoSaveTimeoutRef.current);
   }, [messages, selectedModel, activeSavedChatId]);
+
+  useEffect(() => {
+    activeSavedChatIdRef.current = activeSavedChatId;
+  }, [activeSavedChatId]);
+
+  useEffect(() => {
+    savedChatsRef.current = savedChats;
+  }, [savedChats]);
 
   const showChatStatus = (status) => {
     setChatStatus(status);
@@ -558,7 +733,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     chatStatusTimeoutRef.current = window.setTimeout(() => setChatStatus(''), 3000);
   };
 
-  const saveChatSnapshot = (chatMessages, { showStatus = false } = {}) => {
+  const saveChatSnapshot = async (chatMessages, { showStatus = false, reportErrors = false } = {}) => {
     if (chatMessages.length === 0) {
       if (showStatus) {
         showChatStatus('No messages to save.');
@@ -566,31 +741,35 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       return '';
     }
 
-    const now = new Date().toISOString();
-    const id = activeSavedChatId || `chat-${Date.now()}`;
-    setSavedChats(prevChats => {
-      const existingChat = prevChats.find(chat => chat.id === id);
-      const savedChat = {
+    const id = activeSavedChatIdRef.current || '';
+    const existingChat = savedChatsRef.current.find(chat => chat.id === id);
+    try {
+      const savedChat = await saveChatToServer({
         id,
         title: existingChat?.title || createChatTitle(chatMessages),
         model: selectedModel,
-        updatedAt: now,
         messages: chatMessages,
-      };
-      const nextChats = [
+      });
+
+      setSavedChats(prevChats => [
         savedChat,
-        ...prevChats.filter(chat => chat.id !== id),
-      ].slice(0, 50);
-      persistSavedChats(nextChats);
-      return nextChats;
-    });
-    if (activeSavedChatId !== id) {
-      setActiveSavedChatId(id);
+        ...prevChats.filter(chat => chat.id !== savedChat.id),
+      ].slice(0, 50));
+      if (activeSavedChatIdRef.current !== savedChat.id) {
+        activeSavedChatIdRef.current = savedChat.id;
+        setActiveSavedChatId(savedChat.id);
+      }
+      if (showStatus) {
+        showChatStatus('Chat saved.');
+      }
+      return savedChat.id;
+    } catch (error) {
+      console.error('Failed to save chat:', error);
+      if (showStatus || reportErrors) {
+        showChatStatus(error.message);
+      }
+      return '';
     }
-    if (showStatus) {
-      showChatStatus('Chat saved.');
-    }
-    return id;
   };
 
   const handleSaveChat = () => {
@@ -607,6 +786,7 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       showChatStatus('Saved chat not found.');
       return;
     }
+    skipNextAutoSaveRef.current = true;
     setMessages(savedChat.messages || []);
     if (savedChat.model) {
       onModelResolved?.(savedChat.model);
@@ -617,10 +797,11 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
   const handleNewChat = () => {
     setMessages([]);
     setActiveSavedChatId('');
+    setShowSavedChatActions(false);
     showChatStatus('Started a new chat.');
   };
 
-  const handleRenameSavedChat = () => {
+  const handleRenameSavedChat = async () => {
     if (!activeSavedChatId) {
       showChatStatus('Select a saved chat first.');
       return;
@@ -643,31 +824,40 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
       return;
     }
 
-    setSavedChats(prevChats => {
-      const nextChats = prevChats.map(chat => (
-        chat.id === activeSavedChatId
-          ? { ...chat, title: trimmedTitle }
-          : chat
-      ));
-      persistSavedChats(nextChats);
-      return nextChats;
-    });
-    showChatStatus('Chat renamed.');
+    try {
+      const renamedChat = await renameChatOnServer(activeSavedChatId, trimmedTitle);
+      setSavedChats(prevChats => prevChats.map(chat => (
+        chat.id === activeSavedChatId ? renamedChat : chat
+      )));
+      setShowSavedChatActions(false);
+      showChatStatus('Chat renamed.');
+    } catch (error) {
+      showChatStatus(error.message);
+    }
   };
 
-  const handleDeleteSavedChat = () => {
+  const handleDeleteSavedChat = async () => {
     if (!activeSavedChatId) {
       showChatStatus('Select a saved chat first.');
       return;
     }
-    const nextChats = savedChats.filter(chat => chat.id !== activeSavedChatId);
-    persistSavedChats(nextChats);
-    skipNextAutoSaveRef.current = true;
-    setSavedChats(nextChats);
-    setMessages([]);
-    setActiveSavedChatId('');
-    setShowDeleteChatConfirm(false);
-    showChatStatus('Saved chat deleted.');
+    const savedChat = savedChats.find(chat => chat.id === activeSavedChatId);
+    const confirmed = window.confirm(`Delete "${savedChat?.title || 'this saved chat'}"?`);
+    if (!confirmed) {
+      return;
+    }
+    try {
+      await deleteChatFromServer(activeSavedChatId);
+      const nextChats = savedChats.filter(chat => chat.id !== activeSavedChatId);
+      skipNextAutoSaveRef.current = true;
+      setSavedChats(nextChats);
+      setMessages([]);
+      setActiveSavedChatId('');
+      setShowSavedChatActions(false);
+      showChatStatus('Saved chat deleted.');
+    } catch (error) {
+      showChatStatus(error.message);
+    }
   };
 
   const handleExportChat = (format) => {
@@ -1171,120 +1361,216 @@ function Chat({ connected, selectedModel, onModelResolved, weaviateInfo }) {
     }
   };
 
+  const hasConversation = messages.length > 0;
+
   return (
-    <div className="chat-container">
+    <div className={`chat-container ${hasConversation ? 'has-conversation' : 'empty-chat'}`}>
       <div className="chat-toolbar">
         <div className="saved-chat-controls">
-          <select
-            className="saved-chat-select"
-            value={activeSavedChatId}
-            onChange={(event) => handleLoadChat(event.target.value)}
-            title="Load saved chat"
-          >
-            <option value="">Saved chats</option>
-            {savedChats.map(chat => (
-              <option key={chat.id} value={chat.id}>
-                {chat.title}
-              </option>
-            ))}
-          </select>
-          <button type="button" onClick={handleSaveChat} disabled={messages.length === 0}>
-            Save chat
-          </button>
-          <button type="button" onClick={handleNewChat} disabled={messages.length === 0 && !activeSavedChatId}>
-            New chat
-          </button>
-          <button type="button" onClick={handleRenameSavedChat} disabled={!activeSavedChatId}>
-            Rename chat
-          </button>
-          <div
-            className="delete-chat-confirm-menu"
-            ref={deleteChatConfirmRef}
-            onBlur={(event) => {
-              if (!event.currentTarget.contains(event.relatedTarget)) {
-                setShowDeleteChatConfirm(false);
-              }
-            }}
-          >
-            <button
-              type="button"
-              onClick={() => setShowDeleteChatConfirm(current => !current)}
-              disabled={!activeSavedChatId}
-              aria-expanded={showDeleteChatConfirm}
+          <h1 className="chat-toolbar-title">MCP Gemma Chat</h1>
+          <label className="toolbar-model-picker" htmlFor="model-select">
+            <span>Model</span>
+            <select
+              id="model-select"
+              value={selectedModel}
+              onChange={(event) => onModelChange(event.target.value)}
+              disabled={!connected || modelOptions.length === 0}
             >
-              Delete selected chat
-            </button>
-            {showDeleteChatConfirm && (
-              <div className="delete-chat-confirm-popover">
-                <span>Delete this saved chat?</span>
-                <div className="delete-chat-confirm-actions">
-                  <button type="button" className="delete-chat-confirm-cancel" onClick={() => setShowDeleteChatConfirm(false)}>
-                    Cancel
-                  </button>
-                  <button type="button" className="delete-chat-confirm-delete" onClick={handleDeleteSavedChat}>
-                    Delete
-                  </button>
-                </div>
-              </div>
+              {modelOptions.length === 0 ? (
+                <option value="">No models found</option>
+              ) : (
+                modelOptions.map(model => (
+                  <option key={model} value={model}>
+                    {model}{installedModelSet.has(model) ? '' : ' (not installed)'}
+                  </option>
+                ))
+              )}
+            </select>
+            {selectedModel && !installedModelSet.has(selectedModel) && (
+              <span className="toolbar-model-note">
+                fallback unless pulled
+              </span>
             )}
-          </div>
-        </div>
-        <div className="export-chat-controls">
+          </label>
           <button type="button" onClick={() => handleExportChat('markdown')} disabled={messages.length === 0}>
             Export MD
           </button>
           <button type="button" onClick={() => handleExportChat('json')} disabled={messages.length === 0}>
             Export JSON
           </button>
+        </div>
+        <div className="chat-toolbar-system">
+          <div className={`toolbar-status-indicator ${connected ? 'connected' : 'disconnected'}`}>
+            <span className="toolbar-status-dot"></span>
+            <span>{connected ? 'Backend' : 'Backend off'}</span>
+          </div>
+          <div className={`toolbar-status-indicator ${weaviateReady ? 'connected' : 'disconnected'}`}>
+            <span className="toolbar-status-dot"></span>
+            <span>{weaviateReady ? 'Weaviate' : 'Weaviate off'}</span>
+          </div>
           {chatStatus && <span className="chat-toolbar-status">{chatStatus}</span>}
         </div>
       </div>
-      <div
-        className="messages-area"
-        ref={messagesAreaRef}
-        onScroll={handleMessagesScroll}
-        onWheel={handleMessagesWheel}
-        onTouchStart={handleMessagesTouchStart}
-        onTouchMove={handleMessagesTouchMove}
-        onClick={() => setCollapseSourcesSignal(signal => signal + 1)}
-      >
-        {messages.length === 0 && (
-          <div className="empty-state">
-            <div className="empty-icon">AI</div>
-            <h2>Welcome to MCP Gemma Chat</h2>
-            <p>Start a conversation with the Gemma model</p>
+      <div className="chat-workspace">
+        <aside
+          className={`saved-chats-sidebar ${showSavedChatsSidebar ? '' : 'collapsed'}`}
+          style={showSavedChatsSidebar ? { '--saved-chats-sidebar-width': `${savedChatsSidebarWidth}px` } : undefined}
+        >
+          <div className="saved-chats-sidebar-header">
+            {showSavedChatsSidebar && <span>Saved chats</span>}
+            <button
+              type="button"
+              className="saved-chats-collapse-button"
+              onClick={() => setShowSavedChatsSidebar(current => !current)}
+              aria-label={showSavedChatsSidebar ? 'Collapse saved chats sidebar' : 'Expand saved chats sidebar'}
+              title={showSavedChatsSidebar ? 'Collapse saved chats' : 'Expand saved chats'}
+            >
+              ☰
+            </button>
           </div>
-        )}
-        {messages.map((msg, idx) => (
-          <Message
-            key={idx}
-            role={msg.role}
-            content={msg.content}
-            thinking={msg.thinking}
-            showLoading={msg.showLoading}
-            sources={msg.sources}
-            collapseSourcesSignal={collapseSourcesSignal}
+          {showSavedChatsSidebar && (
+            <div className="saved-chats-list">
+              {savedChats.length === 0 ? (
+                <div className="saved-chats-empty">No saved chats.</div>
+              ) : (
+                savedChats.map(chat => {
+                  const isActiveChat = activeSavedChatId === chat.id;
+                  return (
+                  <div
+                    key={chat.id}
+                    className={`saved-chat-row ${isActiveChat ? 'active' : ''}`}
+                  >
+                    <button
+                      type="button"
+                      className="saved-chat-item"
+                      onClick={() => handleLoadChat(chat.id)}
+                      title={chat.title}
+                    >
+                      {chat.title}
+                    </button>
+                    {isActiveChat && (
+                      <div
+                        className="saved-chat-actions-menu"
+                        ref={savedChatActionsRef}
+                        onBlur={(event) => {
+                          if (!event.currentTarget.contains(event.relatedTarget)) {
+                            setShowSavedChatActions(false);
+                          }
+                        }}
+                      >
+                        <button
+                          type="button"
+                          className="saved-chat-actions-button"
+                          onClick={() => setShowSavedChatActions(current => !current)}
+                          aria-label="Saved chat actions"
+                          aria-expanded={showSavedChatActions}
+                          title="Saved chat actions"
+                        >
+                          ...
+                        </button>
+                        {showSavedChatActions && (
+                          <div className="saved-chat-actions-popover">
+                            <button
+                              type="button"
+                              onClick={() => {
+                                setShowSavedChatActions(false);
+                                handleSaveChat();
+                              }}
+                              disabled={messages.length === 0}
+                            >
+                              Save current chat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleNewChat}
+                              disabled={messages.length === 0 && !activeSavedChatId}
+                            >
+                              New chat
+                            </button>
+                            <button
+                              type="button"
+                              onClick={handleRenameSavedChat}
+                              disabled={!activeSavedChatId}
+                            >
+                              Rename selected
+                            </button>
+                            <button
+                              type="button"
+                              className="saved-chat-delete-action"
+                              onClick={handleDeleteSavedChat}
+                              disabled={!activeSavedChatId}
+                            >
+                              Delete selected
+                            </button>
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  );
+                })
+              )}
+            </div>
+          )}
+          {showSavedChatsSidebar && (
+            <div
+              className="saved-chats-sidebar-resize-handle"
+              onPointerDown={startSavedChatsSidebarResize}
+              role="separator"
+              aria-orientation="vertical"
+              aria-label="Resize saved chats sidebar"
+              title="Resize saved chats sidebar"
+            />
+          )}
+        </aside>
+        <div className="chat-main">
+          <div
+            className="messages-area"
+            ref={messagesAreaRef}
+            onScroll={handleMessagesScroll}
+            onWheel={handleMessagesWheel}
+            onTouchStart={handleMessagesTouchStart}
+            onTouchMove={handleMessagesTouchMove}
+            onClick={() => setCollapseSourcesSignal(signal => signal + 1)}
+          >
+            {messages.length === 0 && (
+              <div className="empty-state">
+                <h2>Welcome to MCP Gemma Chat</h2>
+                <p>Start a conversation with the Gemma model</p>
+              </div>
+            )}
+            {messages.map((msg, idx) => (
+              <Message
+                key={idx}
+                role={msg.role}
+                content={msg.content}
+                thinking={msg.thinking}
+                showLoading={msg.showLoading}
+                sources={msg.sources}
+                collapseSourcesSignal={collapseSourcesSignal}
+              />
+            ))}
+          </div>
+          <InputArea
+            onSendMessage={handleSendMessage}
+            onStopChat={handleStopChat}
+            onUploadFiles={handleUploadFiles}
+            onCreateCollection={handleCreateCollection}
+            onDeleteCollection={handleDeleteCollection}
+            disabled={!connected || loading || !wsConnected || uploading}
+            uploadDisabled={!connected || uploading || weaviateInfo?.status !== 'ready'}
+            uploadStatus={weaviateInfo}
+            loading={loading}
+            uploadLoading={uploading}
+            collections={collections}
+            selectedUploadCollection={selectedUploadCollection}
+            onUploadCollectionChange={setSelectedUploadCollection}
+            selectedContextCollections={selectedContextCollections}
+            onContextCollectionsChange={setSelectedContextCollections}
+            collectionLoading={collectionLoading}
           />
-        ))}
+        </div>
       </div>
-      <InputArea
-        onSendMessage={handleSendMessage}
-        onStopChat={handleStopChat}
-        onUploadFiles={handleUploadFiles}
-        onCreateCollection={handleCreateCollection}
-        onDeleteCollection={handleDeleteCollection}
-        disabled={!connected || loading || !wsConnected || uploading}
-        uploadDisabled={!connected || uploading || weaviateInfo?.status !== 'ready'}
-        uploadStatus={weaviateInfo}
-        loading={loading}
-        uploadLoading={uploading}
-        collections={collections}
-        selectedUploadCollection={selectedUploadCollection}
-        onUploadCollectionChange={setSelectedUploadCollection}
-        selectedContextCollections={selectedContextCollections}
-        onContextCollectionsChange={setSelectedContextCollections}
-        collectionLoading={collectionLoading}
-      />
     </div>
   );
 }

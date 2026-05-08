@@ -5,6 +5,7 @@ import dotenv from 'dotenv';
 import { WebSocketServer } from 'ws';
 import { createServer } from 'http';
 import weaviate from 'weaviate-ts-client';
+import pg from 'pg';
 dotenv.config();
 const app = express();
 const server = createServer(app);
@@ -18,19 +19,19 @@ const wss = new WebSocketServer({
 });
 // Configuration
 const OLLAMA_BASE_URL = process.env.OLLAMA_BASE_URL || 'http://localhost:11434';
-const MODEL_NAME = process.env.MODEL_NAME || 'gemma3:4b';
+const MODEL_NAME = process.env.MODEL_NAME || 'gemma4:26b';
 const API_PORT = process.env.API_PORT || 3000;
 const MCP_PORT = process.env.MCP_PORT || 3001;
 const WEAVIATE_URL = process.env.WEAVIATE_URL || 'http://localhost:8080';
 const DEFAULT_WEAVIATE_FILE_CLASS = process.env.WEAVIATE_FILE_CLASS || 'uploaded_files';
 const MAX_UPLOAD_FILE_BYTES = Number(process.env.MAX_UPLOAD_FILE_BYTES || 20 * 1024 * 1024);
 const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 12);
-const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 12000);
+const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 32000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
 const WEAVIATE_PQ_TRAINING_LIMIT = Number(process.env.WEAVIATE_PQ_TRAINING_LIMIT || 50000);
-const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 300);
-const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 50);
-const WEAVIATE_UPLOAD_MIN_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_MIN_CHUNK_CHARS || 200);
+const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 1800);
+const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 250);
+const WEAVIATE_UPLOAD_MIN_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_MIN_CHUNK_CHARS || 800);
 const WEAVIATE_UPLOAD_CHUNK_DELAY_MS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_DELAY_MS || 20);
 const WEAVIATE_UPLOAD_CHUNK_RETRIES = Number(process.env.WEAVIATE_UPLOAD_CHUNK_RETRIES || 3);
 const WEAVIATE_HYBRID_ALPHA = Number(process.env.WEAVIATE_HYBRID_ALPHA || 0.35);
@@ -40,11 +41,25 @@ const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLo
 const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
-const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma3:4b,gemma3:12b,gemma3:27b')
+const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma4:26b,gemma4:e4b,gemma4:31b')
     .split(',')
     .map((model) => model.trim())
     .filter(Boolean);
 const weaviateUrl = new URL(WEAVIATE_URL);
+const { Pool } = pg;
+const DATABASE_URL = process.env.DATABASE_URL?.trim();
+const databaseUrlPassword = DATABASE_URL ? new URL(DATABASE_URL).password : '';
+const postgresPassword = String(process.env.PGPASSWORD || databaseUrlPassword || 'mcp_dev_password');
+const postgresPoolConfig = DATABASE_URL
+    ? { connectionString: DATABASE_URL, password: postgresPassword }
+    : {
+        host: process.env.PGHOST || 'localhost',
+        port: Number(process.env.PGPORT || 5432),
+        database: process.env.PGDATABASE || 'mcp_gemma',
+        user: process.env.PGUSER || 'mcp',
+        password: postgresPassword,
+    };
+const postgresPool = new Pool(postgresPoolConfig);
 // Initialize Weaviate client
 const weaviateClient = weaviate.client({
     scheme: weaviateUrl.protocol.replace(':', ''),
@@ -54,10 +69,112 @@ const weaviateClient = weaviate.client({
 app.use(cors());
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '25mb' }));
 let ollamaModelCache = null;
+let databaseReadyPromise = null;
 const errorMessage = (error) => error instanceof Error ? error.message : String(error);
 const errorStack = (error) => error instanceof Error ? error.stack : undefined;
 const isConnectionRefused = (error) => errorMessage(error).includes('ECONNREFUSED');
 const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+const normalizeAskedQuestion = (question) => (typeof question === 'string'
+    ? question.replace(/\s+/g, ' ').trim().toLowerCase()
+    : '');
+const createChatId = () => `chat-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+const validateChatMessages = (messages) => {
+    if (!Array.isArray(messages)) {
+        throw new Error('Chat messages must be an array.');
+    }
+    return messages.map((message) => {
+        if (!message || typeof message !== 'object') {
+            throw new Error('Each chat message must be an object.');
+        }
+        const role = message.role;
+        const content = message.content;
+        if (typeof role !== 'string' || !role.trim()) {
+            throw new Error('Each chat message must include a role.');
+        }
+        if (typeof content !== 'string') {
+            throw new Error('Each chat message must include string content.');
+        }
+        return message;
+    });
+};
+const ensureDatabase = async () => {
+    if (!databaseReadyPromise) {
+        databaseReadyPromise = (async () => {
+            await postgresPool.query(`
+        CREATE TABLE IF NOT EXISTS saved_chats (
+          id TEXT PRIMARY KEY,
+          title TEXT NOT NULL,
+          model TEXT,
+          messages JSONB NOT NULL,
+          created_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          updated_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+            await postgresPool.query(`
+        CREATE TABLE IF NOT EXISTS top_asked_questions (
+          normalized_question TEXT PRIMARY KEY,
+          display_question TEXT NOT NULL,
+          ask_count INTEGER NOT NULL DEFAULT 1,
+          first_asked_at TIMESTAMPTZ NOT NULL DEFAULT now(),
+          last_asked_at TIMESTAMPTZ NOT NULL DEFAULT now()
+        );
+      `);
+            await postgresPool.query(`
+        CREATE INDEX IF NOT EXISTS top_asked_questions_count_idx
+        ON top_asked_questions (ask_count DESC, last_asked_at DESC);
+      `);
+        })().catch((error) => {
+            databaseReadyPromise = null;
+            throw error;
+        });
+    }
+    return databaseReadyPromise;
+};
+const toSavedChat = (row) => ({
+    id: row.id,
+    title: row.title,
+    model: row.model,
+    messages: row.messages,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+});
+const upsertSavedChat = async ({ id, title, model, messages }) => {
+    await ensureDatabase();
+    const chatId = typeof id === 'string' && id.trim() ? id.trim() : createChatId();
+    const result = await postgresPool.query(`
+      INSERT INTO saved_chats (id, title, model, messages)
+      VALUES ($1, $2, $3, $4::jsonb)
+      ON CONFLICT (id) DO UPDATE SET
+        title = EXCLUDED.title,
+        model = EXCLUDED.model,
+        messages = EXCLUDED.messages,
+        updated_at = now()
+      RETURNING id, title, model, messages, created_at, updated_at;
+    `, [chatId, title, model || null, JSON.stringify(messages)]);
+    return toSavedChat(result.rows[0]);
+};
+const recordAskedQuestion = async (question) => {
+    const displayQuestion = typeof question === 'string' ? question.replace(/\s+/g, ' ').trim() : '';
+    const normalizedQuestion = normalizeAskedQuestion(displayQuestion);
+    if (!normalizedQuestion) {
+        return;
+    }
+    await ensureDatabase();
+    await postgresPool.query(`
+      INSERT INTO top_asked_questions (normalized_question, display_question)
+      VALUES ($1, $2)
+      ON CONFLICT (normalized_question) DO UPDATE SET
+        display_question = EXCLUDED.display_question,
+        ask_count = top_asked_questions.ask_count + 1,
+        last_asked_at = now();
+    `, [normalizedQuestion, displayQuestion]);
+};
+const trackAskedQuestionMiddleware = (req, res, next) => {
+    recordAskedQuestion(req.body?.message).catch((error) => {
+        console.error('Question analytics error:', errorMessage(error));
+    });
+    next();
+};
 const isTransientWeaviateVectorizerError = (error) => {
     const message = errorMessage(error);
     return [
@@ -201,6 +318,36 @@ const fileCollectionProperties = () => [
         description: 'Total number of chunks produced from the uploaded file',
     },
     {
+        name: 'chunkType',
+        dataType: ['text'],
+        description: 'Structural type of this chunk, such as paragraph, table, or code',
+    },
+    {
+        name: 'sectionTitle',
+        dataType: ['text'],
+        description: 'Nearest heading or structural title for this chunk',
+    },
+    {
+        name: 'sectionPath',
+        dataType: ['text'],
+        description: 'Heading path that locates this chunk within the uploaded file',
+    },
+    {
+        name: 'language',
+        dataType: ['text'],
+        description: 'Detected code or document language for this chunk',
+    },
+    {
+        name: 'startLine',
+        dataType: ['int'],
+        description: 'One-based starting line for this chunk in the uploaded file',
+    },
+    {
+        name: 'endLine',
+        dataType: ['int'],
+        description: 'One-based ending line for this chunk in the uploaded file',
+    },
+    {
         name: 'mimeType',
         dataType: ['text'],
         description: 'Uploaded file MIME type',
@@ -257,10 +404,10 @@ const clampNumber = (value, fallback, min, max) => {
 };
 const normalizeGenerationOptions = (options = {}) => ({
     temperature: clampNumber(options.temperature, 0.2, 0, 1),
-    top_p: clampNumber(options.top_p, 0.85, 0.05, 1),
+    top_p: clampNumber(options.top_p, 0.95, 0.05, 1),
 });
 const normalizeContextOptions = (options = {}) => ({
-    contextChars: Math.round(clampNumber(options.contextChars, WEAVIATE_CONTEXT_CHARS, 1000, 24000)),
+    contextChars: Math.round(clampNumber(options.contextChars, WEAVIATE_CONTEXT_CHARS, 1000, 64000)),
     contextResults: Math.round(clampNumber(options.contextResults, WEAVIATE_CONTEXT_RESULTS, 1, 12)),
 });
 const ensureFileCollection = async (className) => {
@@ -357,25 +504,165 @@ const createWeaviateChunkWithRetry = async (className, properties) => {
                 throw error;
             }
             const delayMs = 500 * (attempt + 1) * (attempt + 1);
-            console.warn(`Weaviate vectorizer reset while uploading chunk ${properties.chunkIndex + 1}/${properties.chunkCount}; retrying in ${delayMs}ms.`);
+            console.warn(`Weaviate vectorizer reset while uploading chunk ${Number(properties.chunkIndex) + 1}/${properties.chunkCount}; retrying in ${delayMs}ms.`);
             await sleep(delayMs);
         }
     }
     throw lastError;
 };
-const splitContentIntoChunks = (content) => {
+const splitContentIntoChunks = (content, filePath = '', mimeType = '') => {
     const normalizedChunkChars = Math.max(WEAVIATE_UPLOAD_MIN_CHUNK_CHARS, WEAVIATE_UPLOAD_CHUNK_CHARS);
     const normalizedOverlapChars = Math.min(Math.max(0, WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS), Math.floor(normalizedChunkChars / 2));
+    const fallbackLanguage = detectLanguage(filePath, mimeType);
+    const fallbackSectionTitle = filePath.split('/').filter(Boolean).pop() || 'Uploaded file';
     if (content.length <= normalizedChunkChars) {
-        return [content.trim()];
+        return [{
+                content: formatChunkContent(content.trim(), fallbackSectionTitle, fallbackSectionTitle, fallbackLanguage),
+                chunkType: isCodeLanguage(fallbackLanguage) ? 'code' : 'paragraph',
+                sectionTitle: fallbackSectionTitle,
+                sectionPath: fallbackSectionTitle,
+                language: fallbackLanguage,
+                startLine: 1,
+                endLine: Math.max(1, content.split('\n').length),
+            }];
     }
+    const blocks = splitContentIntoChunkBlocks(content, filePath, mimeType);
+    const chunks = [];
+    let currentBlocks = [];
+    let currentText = '';
+    let carryOverlap = '';
+    const pushCurrentChunk = () => {
+        const chunkText = currentText.trim();
+        if (chunkText && currentBlocks.length > 0) {
+            const firstBlock = currentBlocks[0];
+            const lastBlock = currentBlocks[currentBlocks.length - 1];
+            const metadataBlock = lastBlock.sectionPath ? lastBlock : firstBlock;
+            chunks.push({
+                content: formatChunkContent(chunkText, metadataBlock.sectionTitle, metadataBlock.sectionPath, metadataBlock.language),
+                chunkType: currentBlocks.some(block => block.type === 'code') ? 'code' : currentBlocks.some(block => block.type === 'table') ? 'table' : 'paragraph',
+                sectionTitle: metadataBlock.sectionTitle,
+                sectionPath: metadataBlock.sectionPath,
+                language: metadataBlock.language || fallbackLanguage,
+                startLine: firstBlock.startLine,
+                endLine: lastBlock.endLine,
+            });
+            carryOverlap = getChunkOverlapText(chunkText, normalizedOverlapChars);
+        }
+        currentBlocks = [];
+        currentText = '';
+    };
+    for (const block of blocks) {
+        const blockText = block.text.trim();
+        if (!blockText) {
+            continue;
+        }
+        if (blockText.length > normalizedChunkChars) {
+            pushCurrentChunk();
+            const oversizedText = block.type === 'table'
+                ? blockText
+                : carryOverlap ? `${carryOverlap}\n\n${blockText}` : blockText;
+            const oversizedChunks = block.type === 'table'
+                ? splitLargeTableBlock(oversizedText, normalizedChunkChars, normalizedOverlapChars)
+                : splitTextByCharacterWindow(oversizedText, normalizedChunkChars, normalizedOverlapChars);
+            chunks.push(...oversizedChunks.map((chunkText) => ({
+                content: formatChunkContent(chunkText, block.sectionTitle, block.sectionPath, block.language || fallbackLanguage),
+                chunkType: block.type,
+                sectionTitle: block.sectionTitle,
+                sectionPath: block.sectionPath,
+                language: block.language || fallbackLanguage,
+                startLine: block.startLine,
+                endLine: block.endLine,
+            })));
+            carryOverlap = getChunkOverlapText(oversizedChunks[oversizedChunks.length - 1] || '', normalizedOverlapChars);
+            continue;
+        }
+        const baseChunk = currentText || carryOverlap;
+        const candidateChunk = baseChunk ? `${baseChunk}\n\n${blockText}` : blockText;
+        if (candidateChunk.length <= normalizedChunkChars) {
+            currentText = candidateChunk;
+            currentBlocks.push(block);
+            carryOverlap = '';
+            continue;
+        }
+        pushCurrentChunk();
+        const chunkWithOverlap = carryOverlap ? `${carryOverlap}\n\n${blockText}` : blockText;
+        currentText = chunkWithOverlap.length <= normalizedChunkChars ? chunkWithOverlap : blockText;
+        currentBlocks = [block];
+        carryOverlap = '';
+    }
+    pushCurrentChunk();
+    if (chunks.length > 0) {
+        return chunks;
+    }
+    return splitTextByCharacterWindow(content, normalizedChunkChars, normalizedOverlapChars).map((chunkText) => ({
+        content: formatChunkContent(chunkText, fallbackSectionTitle, fallbackSectionTitle, fallbackLanguage),
+        chunkType: isCodeLanguage(fallbackLanguage) ? 'code' : 'paragraph',
+        sectionTitle: fallbackSectionTitle,
+        sectionPath: fallbackSectionTitle,
+        language: fallbackLanguage,
+        startLine: 1,
+        endLine: Math.max(1, content.split('\n').length),
+    }));
+};
+const formatChunkContent = (text, sectionTitle, sectionPath, language) => {
+    const metadataLines = [
+        sectionPath ? `Section: ${sectionPath}` : sectionTitle ? `Section: ${sectionTitle}` : '',
+        language ? `Language: ${language}` : '',
+    ].filter(Boolean);
+    return metadataLines.length > 0 ? `${metadataLines.join('\n')}\n\n${text}` : text;
+};
+const detectLanguage = (filePath, mimeType = '') => {
+    const extension = filePath.toLowerCase().match(/\.([a-z0-9]+)$/)?.[1] || '';
+    const byExtension = {
+        c: 'c',
+        cc: 'cpp',
+        cpp: 'cpp',
+        cs: 'csharp',
+        css: 'css',
+        go: 'go',
+        h: 'c',
+        hpp: 'cpp',
+        html: 'html',
+        java: 'java',
+        js: 'javascript',
+        json: 'json',
+        jsx: 'javascript',
+        md: 'markdown',
+        mdx: 'markdown',
+        py: 'python',
+        rb: 'ruby',
+        rs: 'rust',
+        sh: 'shell',
+        sql: 'sql',
+        ts: 'typescript',
+        tsx: 'typescript',
+        txt: 'text',
+        yaml: 'yaml',
+        yml: 'yaml',
+    };
+    if (byExtension[extension]) {
+        return byExtension[extension];
+    }
+    if (mimeType.includes('markdown')) {
+        return 'markdown';
+    }
+    if (mimeType.includes('json')) {
+        return 'json';
+    }
+    if (mimeType.startsWith('text/')) {
+        return 'text';
+    }
+    return '';
+};
+const isCodeLanguage = (language = '') => (['c', 'cpp', 'csharp', 'css', 'go', 'html', 'java', 'javascript', 'json', 'python', 'ruby', 'rust', 'shell', 'sql', 'typescript', 'yaml'].includes(language));
+const splitTextByCharacterWindow = (content, chunkChars, overlapChars) => {
     const chunks = [];
     let start = 0;
     while (start < content.length) {
-        const hardEnd = Math.min(content.length, start + normalizedChunkChars);
+        const hardEnd = Math.min(content.length, start + chunkChars);
         let end = hardEnd;
         if (hardEnd < content.length) {
-            const breakWindowStart = Math.max(start + Math.floor(normalizedChunkChars * 0.6), hardEnd - 600);
+            const breakWindowStart = Math.max(start + Math.floor(chunkChars * 0.6), hardEnd - 600);
             const breakWindow = content.slice(breakWindowStart, hardEnd);
             const paragraphBreak = breakWindow.lastIndexOf('\n\n');
             const lineBreak = breakWindow.lastIndexOf('\n');
@@ -392,9 +679,202 @@ const splitContentIntoChunks = (content) => {
         if (end >= content.length) {
             break;
         }
-        start = Math.max(end - normalizedOverlapChars, start + 1);
+        start = Math.max(end - overlapChars, start + 1);
     }
     return chunks;
+};
+const getChunkOverlapText = (text, overlapChars) => {
+    if (overlapChars <= 0 || !text.trim()) {
+        return '';
+    }
+    const overlap = text.slice(-overlapChars).trim();
+    const cleanStart = Math.max(overlap.indexOf('\n\n'), overlap.indexOf('\n'), overlap.indexOf('. '), overlap.indexOf('? '), overlap.indexOf('! '));
+    return cleanStart > 0 ? overlap.slice(cleanStart + 1).trim() : overlap;
+};
+const isMarkdownTableRow = (line) => {
+    const trimmed = line.trim();
+    return trimmed.includes('|') && trimmed.replace(/\\\|/g, '').split('|').length >= 3;
+};
+const isMarkdownTableSeparator = (line) => (/^\s*\|?\s*:?-{3,}:?\s*(\|\s*:?-{3,}:?\s*)+\|?\s*$/.test(line));
+const isMarkdownTableStart = (lines, index) => (isMarkdownTableRow(lines[index] || '')
+    && isMarkdownTableSeparator(lines[index + 1] || ''));
+const splitContentIntoChunkBlocks = (content, filePath = '', mimeType = '') => {
+    const fallbackLanguage = detectLanguage(filePath, mimeType);
+    if (isCodeLanguage(fallbackLanguage) && fallbackLanguage !== 'markdown') {
+        return splitSourceCodeIntoChunkBlocks(content, filePath, fallbackLanguage);
+    }
+    const lines = content.replace(/\r\n/g, '\n').split('\n');
+    const blocks = [];
+    const headingStack = [];
+    const fallbackSectionTitle = filePath.split('/').filter(Boolean).pop() || 'Uploaded file';
+    let index = 0;
+    while (index < lines.length) {
+        while (index < lines.length && !lines[index].trim()) {
+            index += 1;
+        }
+        if (index >= lines.length) {
+            break;
+        }
+        const headingMatch = lines[index].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/);
+        if (headingMatch) {
+            const level = headingMatch[1].length;
+            headingStack.splice(level - 1);
+            headingStack[level - 1] = headingMatch[2].trim();
+            index += 1;
+            continue;
+        }
+        const activeHeadings = headingStack.filter(Boolean);
+        const sectionPath = activeHeadings.join(' > ') || fallbackSectionTitle;
+        const sectionTitle = activeHeadings[activeHeadings.length - 1] || fallbackSectionTitle;
+        const fencedCodeMatch = lines[index].match(/^```([A-Za-z0-9_+.-]*)\s*$/);
+        if (fencedCodeMatch) {
+            const startLine = index + 1;
+            const codeLines = [lines[index]];
+            index += 1;
+            while (index < lines.length) {
+                codeLines.push(lines[index]);
+                const isFenceEnd = /^```\s*$/.test(lines[index]);
+                index += 1;
+                if (isFenceEnd) {
+                    break;
+                }
+            }
+            blocks.push({
+                type: 'code',
+                text: codeLines.join('\n'),
+                sectionTitle,
+                sectionPath,
+                language: fencedCodeMatch[1] || fallbackLanguage,
+                startLine,
+                endLine: index,
+            });
+            continue;
+        }
+        if (isMarkdownTableStart(lines, index)) {
+            const tableLines = [];
+            const startLine = index + 1;
+            while (index < lines.length && isMarkdownTableRow(lines[index])) {
+                tableLines.push(lines[index]);
+                index += 1;
+            }
+            blocks.push({
+                type: 'table',
+                text: tableLines.join('\n'),
+                sectionTitle,
+                sectionPath,
+                language: fallbackLanguage,
+                startLine,
+                endLine: index,
+            });
+            continue;
+        }
+        const paragraphLines = [];
+        const startLine = index + 1;
+        while (index < lines.length
+            && lines[index].trim()
+            && !isMarkdownTableStart(lines, index)
+            && !lines[index].match(/^(#{1,6})\s+(.+?)\s*#*\s*$/)
+            && !lines[index].match(/^```([A-Za-z0-9_+.-]*)\s*$/)) {
+            paragraphLines.push(lines[index]);
+            index += 1;
+        }
+        blocks.push({
+            type: 'paragraph',
+            text: paragraphLines.join('\n'),
+            sectionTitle,
+            sectionPath,
+            language: fallbackLanguage,
+            startLine,
+            endLine: index,
+        });
+    }
+    return blocks;
+};
+const splitSourceCodeIntoChunkBlocks = (content, filePath, language) => {
+    const lines = content.replace(/\r\n/g, '\n').split('\n');
+    const blocks = [];
+    const fallbackSectionTitle = filePath.split('/').filter(Boolean).pop() || 'Source file';
+    const boundaryPattern = /^\s*(export\s+)?(async\s+)?(function|class|interface|type|enum|const|let|var|def|async def|struct|impl|func|public|private|protected|static)\b/;
+    let start = 0;
+    const pushBlock = (endExclusive) => {
+        const text = lines.slice(start, endExclusive).join('\n').trim();
+        if (!text) {
+            start = endExclusive;
+            return;
+        }
+        const titleLine = text.split('\n').find(line => boundaryPattern.test(line.trim())) || fallbackSectionTitle;
+        blocks.push({
+            type: 'code',
+            text,
+            sectionTitle: titleLine.trim().slice(0, 120),
+            sectionPath: `${fallbackSectionTitle} > ${titleLine.trim().slice(0, 120)}`,
+            language,
+            startLine: start + 1,
+            endLine: endExclusive,
+        });
+        start = endExclusive;
+    };
+    for (let index = 1; index < lines.length; index += 1) {
+        if (boundaryPattern.test(lines[index]) && index - start >= 8) {
+            pushBlock(index);
+        }
+    }
+    pushBlock(lines.length);
+    return blocks.length > 0 ? blocks : [{
+            type: 'code',
+            text: content,
+            sectionTitle: fallbackSectionTitle,
+            sectionPath: fallbackSectionTitle,
+            language,
+            startLine: 1,
+            endLine: Math.max(1, lines.length),
+        }];
+};
+const splitLargeTableBlock = (content, chunkChars, overlapChars) => {
+    const lines = content.split('\n');
+    const separatorIndex = lines.findIndex(isMarkdownTableSeparator);
+    if (separatorIndex < 1) {
+        return splitTextByCharacterWindow(content, chunkChars, overlapChars);
+    }
+    const headerLines = lines.slice(0, separatorIndex + 1);
+    const bodyLines = lines.slice(separatorIndex + 1).filter(line => line.trim());
+    const headerText = headerLines.join('\n');
+    if (headerText.length >= chunkChars) {
+        return splitTextByCharacterWindow(content, chunkChars, overlapChars);
+    }
+    const chunks = [];
+    let currentLines = [...headerLines];
+    let overlapRows = [];
+    for (const row of bodyLines) {
+        const candidateLines = [...currentLines, row];
+        if (candidateLines.join('\n').length <= chunkChars) {
+            currentLines = candidateLines;
+            continue;
+        }
+        const chunk = currentLines.join('\n').trim();
+        if (chunk && currentLines.length > headerLines.length) {
+            chunks.push(chunk);
+        }
+        overlapRows = [];
+        let overlapLength = 0;
+        for (let rowIndex = currentLines.length - 1; rowIndex >= headerLines.length; rowIndex -= 1) {
+            const overlapRow = currentLines[rowIndex];
+            if (overlapLength + overlapRow.length > overlapChars) {
+                break;
+            }
+            overlapRows.unshift(overlapRow);
+            overlapLength += overlapRow.length + 1;
+        }
+        currentLines = [...headerLines, ...overlapRows, row];
+        if (currentLines.join('\n').length > chunkChars) {
+            currentLines = [...headerLines, row];
+        }
+    }
+    const finalChunk = currentLines.join('\n').trim();
+    if (finalChunk && currentLines.length > headerLines.length) {
+        chunks.push(finalChunk);
+    }
+    return chunks.length > 0 ? chunks : splitTextByCharacterWindow(content, chunkChars, overlapChars);
 };
 const truncateText = (text, maxLength) => {
     if (text.length <= maxLength) {
@@ -458,11 +938,18 @@ const normalizeWeaviateMatches = (matches, className, query, scoreLabel, snippet
         content: extractRelevantSnippet(item.content.trim(), query, snippetLength),
         fileName: item.filePath || item.fileName,
         filePath: item.filePath,
+        fileId: item.fileId,
+        sectionTitle: item.sectionTitle,
+        sectionPath: item.sectionPath,
+        chunkType: item.chunkType,
+        language: item.language,
         certainty: item._additional?.certainty,
         score: typeof score === 'number' && Number.isFinite(score) ? score : undefined,
         scoreLabel,
         chunkIndex: item.chunkIndex,
         chunkCount: item.chunkCount,
+        startLine: item.startLine,
+        endLine: item.endLine,
         sourceUrl: item._additional?.id
             ? `/api/weaviate/source/${encodeURIComponent(className)}/${encodeURIComponent(item._additional.id)}`
             : undefined,
@@ -507,6 +994,10 @@ const rerankWeaviateResults = (query, items, limit) => {
         const searchableText = [
             item.fileName,
             item.filePath,
+            item.sectionTitle,
+            item.sectionPath,
+            item.chunkType,
+            item.language,
             item.content,
         ].filter(Boolean).join('\n').toLowerCase();
         const matchedTerms = terms.filter(term => searchableText.includes(term));
@@ -516,6 +1007,7 @@ const rerankWeaviateResults = (query, items, limit) => {
         const normalizedWeaviateScore = typeof item.score === 'number' ? Math.min(item.score, 10) / 10 : 0;
         const normalizedCertainty = typeof item.certainty === 'number' ? item.certainty : 0;
         const filePathBoost = item.filePath && terms.some(term => item.filePath?.toLowerCase().includes(term)) ? 0.4 : 0;
+        const sectionBoost = item.sectionPath && terms.some(term => item.sectionPath?.toLowerCase().includes(term)) ? 0.4 : 0;
         return {
             ...item,
             rerankScore: (phraseMatches * 3
@@ -523,7 +1015,8 @@ const rerankWeaviateResults = (query, items, limit) => {
                 + Math.min(termFrequency, 10) * 0.2
                 + normalizedWeaviateScore
                 + normalizedCertainty
-                + filePathBoost),
+                + filePathBoost
+                + sectionBoost),
         };
     });
     return scoredItems
@@ -532,6 +1025,77 @@ const rerankWeaviateResults = (query, items, limit) => {
         || (right.certainty || 0) - (left.certainty || 0)))
         .slice(0, limit);
 };
+const weaviateContextFields = [
+    'content',
+    'fileName',
+    'filePath',
+    'fileId',
+    'sectionTitle',
+    'sectionPath',
+    'chunkType',
+    'language',
+    'startLine',
+    'endLine',
+    'chunkIndex',
+    'chunkCount',
+    '_additional { id score }',
+].join(' ');
+const expandWeaviateResultNeighbors = async (items, className, query, snippetLength) => {
+    const expanded = await Promise.all(items.map(async (item) => {
+        if (!item.filePath || typeof item.chunkIndex !== 'number') {
+            return item;
+        }
+        try {
+            const result = await weaviateClient.graphql
+                .get()
+                .withClassName(className)
+                .withFields(weaviateContextFields)
+                .withWhere({
+                operator: 'And',
+                operands: [
+                    {
+                        path: ['filePath'],
+                        operator: 'Equal',
+                        valueText: item.filePath,
+                    },
+                    {
+                        path: ['chunkIndex'],
+                        operator: 'GreaterThanEqual',
+                        valueInt: Math.max(0, item.chunkIndex - 1),
+                    },
+                    {
+                        path: ['chunkIndex'],
+                        operator: 'LessThanEqual',
+                        valueInt: item.chunkIndex + 1,
+                    },
+                ],
+            })
+                .withLimit(3)
+                .do();
+            const neighbors = (result?.data?.Get?.[className] || [])
+                .filter((neighbor) => typeof neighbor.content === 'string' && typeof neighbor.chunkIndex === 'number')
+                .sort((left, right) => left.chunkIndex - right.chunkIndex);
+            if (neighbors.length <= 1) {
+                return item;
+            }
+            return {
+                ...item,
+                content: neighbors.map((neighbor) => {
+                    const label = neighbor.chunkIndex === item.chunkIndex ? 'Matched chunk' : 'Neighbor chunk';
+                    const lines = typeof neighbor.startLine === 'number' && typeof neighbor.endLine === 'number'
+                        ? `, lines ${neighbor.startLine}-${neighbor.endLine}`
+                        : '';
+                    return `${label} ${neighbor.chunkIndex + 1}/${neighbor.chunkCount || item.chunkCount || '?'}${lines}\n${extractRelevantSnippet(neighbor.content.trim(), query, snippetLength)}`;
+                }).join('\n\n'),
+            };
+        }
+        catch (error) {
+            console.warn(`Weaviate neighbor lookup failed for '${className}': ${errorMessage(error)}`);
+            return item;
+        }
+    }));
+    return expanded;
+};
 const searchWeaviateContext = async (query, className, limit) => {
     try {
         const exists = await weaviateClient.schema.exists(className);
@@ -539,16 +1103,17 @@ const searchWeaviateContext = async (query, className, limit) => {
             console.warn(`Weaviate collection '${className}' does not exist; sending prompt without retrieved context.`);
             return [];
         }
+        await ensureFileCollectionProperties(className);
         const snippetLength = Math.max(300, Math.min(WEAVIATE_SEARCH_SNIPPET_CHARS, Math.floor(WEAVIATE_CONTEXT_CHARS / Math.max(1, limit))));
         const candidateLimit = Math.max(limit, Math.min(WEAVIATE_SEARCH_MAX_CANDIDATES, Math.ceil(limit * Math.max(1, WEAVIATE_RERANK_CANDIDATE_MULTIPLIER))));
-        const searchableProperties = ['content^3', 'fileName', 'filePath'];
+        const searchableProperties = ['content^3', 'sectionTitle^2', 'sectionPath^2', 'chunkType', 'language', 'fileName', 'filePath'];
         const searchMode = ['hybrid', 'keyword', 'both'].includes(WEAVIATE_SEARCH_MODE) ? WEAVIATE_SEARCH_MODE : 'hybrid';
         const hybridPromise = searchMode === 'keyword'
             ? Promise.resolve({ data: { Get: { [className]: [] } } })
             : weaviateClient.graphql
                 .get()
                 .withClassName(className)
-                .withFields('content fileName filePath chunkIndex chunkCount _additional { id score }')
+                .withFields(weaviateContextFields)
                 .withHybrid({ query, alpha: WEAVIATE_HYBRID_ALPHA, properties: searchableProperties })
                 .withLimit(candidateLimit)
                 .do();
@@ -557,7 +1122,7 @@ const searchWeaviateContext = async (query, className, limit) => {
             : weaviateClient.graphql
                 .get()
                 .withClassName(className)
-                .withFields('content fileName filePath chunkIndex chunkCount _additional { id score }')
+                .withFields(weaviateContextFields)
                 .withBm25({ query, properties: searchableProperties })
                 .withLimit(candidateLimit)
                 .do();
@@ -574,7 +1139,8 @@ const searchWeaviateContext = async (query, className, limit) => {
         const keywordMatches = keywordResult.status === 'fulfilled'
             ? normalizeWeaviateMatches(keywordResult.value?.data?.Get?.[className] || [], className, query, 'keyword', snippetLength)
             : [];
-        return rerankWeaviateResults(query, mergeWeaviateResults(hybridMatches, keywordMatches), limit);
+        const ranked = rerankWeaviateResults(query, mergeWeaviateResults(hybridMatches, keywordMatches), limit);
+        return expandWeaviateResultNeighbors(ranked, className, query, snippetLength);
     }
     catch (error) {
         console.warn(`Weaviate context lookup failed; sending prompt without retrieved context: ${errorMessage(error)}`);
@@ -617,7 +1183,12 @@ const buildPromptWithWeaviateContext = async (message, classNames, useWeaviateCo
         const chunk = typeof item.chunkIndex === 'number' && typeof item.chunkCount === 'number'
             ? `, chunk ${item.chunkIndex + 1}/${item.chunkCount}`
             : '';
-        const source = `Source: ${sourceName}${chunk}`;
+        const section = item.sectionPath ? `, section ${item.sectionPath}` : '';
+        const chunkType = item.chunkType ? `, type ${item.chunkType}` : '';
+        const lines = typeof item.startLine === 'number' && typeof item.endLine === 'number'
+            ? `, lines ${item.startLine}-${item.endLine}`
+            : '';
+        const source = `Source: ${sourceName}${chunk}${section}${chunkType}${lines}`;
         const relevance = typeof item.score === 'number'
             ? `, ${item.scoreLabel || 'score'} ${item.score.toFixed(3)}${typeof item.rerankScore === 'number' ? `, rerank ${item.rerankScore.toFixed(3)}` : ''}`
             : typeof item.certainty === 'number'
@@ -689,6 +1260,9 @@ wss.on('connection', (ws, req) => {
                 const generationOptions = normalizeGenerationOptions(payload);
                 const contextOptions = normalizeContextOptions(payload);
                 console.log('👤 User message:', text);
+                recordAskedQuestion(text).catch((error) => {
+                    console.error('Question analytics error:', errorMessage(error));
+                });
                 stopActiveStream(ws, 'Superseded by a new request');
                 const activeStream = {
                     abortController: new AbortController(),
@@ -753,6 +1327,14 @@ wss.on('connection', (ws, req) => {
                                     className: item.className,
                                     fileName: item.fileName,
                                     filePath: item.filePath || item.fileName,
+                                    sectionTitle: item.sectionTitle,
+                                    sectionPath: item.sectionPath,
+                                    chunkType: item.chunkType,
+                                    language: item.language,
+                                    startLine: item.startLine,
+                                    endLine: item.endLine,
+                                    chunkIndex: item.chunkIndex,
+                                    chunkCount: item.chunkCount,
                                     certainty: item.certainty,
                                     score: item.score,
                                     scoreLabel: item.scoreLabel,
@@ -888,6 +1470,128 @@ wss.on('connection', (ws, req) => {
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', model: MODEL_NAME });
 });
+app.get('/api/chats', async (req, res) => {
+    try {
+        await ensureDatabase();
+        const result = await postgresPool.query(`
+      SELECT id, title, model, messages, created_at, updated_at
+      FROM saved_chats
+      ORDER BY updated_at DESC
+      LIMIT 100;
+    `);
+        res.json({ chats: result.rows.map(toSavedChat) });
+    }
+    catch (error) {
+        console.error('Saved chat list error:', errorMessage(error));
+        res.status(500).json({ error: `Failed to load saved chats: ${errorMessage(error)}` });
+    }
+});
+app.post('/api/chats', async (req, res) => {
+    try {
+        const messages = validateChatMessages(req.body?.messages);
+        const title = typeof req.body?.title === 'string' && req.body.title.trim()
+            ? req.body.title.replace(/\s+/g, ' ').trim()
+            : 'Untitled chat';
+        const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
+        const chat = await upsertSavedChat({
+            id: req.body?.id,
+            title,
+            model,
+            messages,
+        });
+        res.json({ chat });
+    }
+    catch (error) {
+        console.error('Saved chat write error:', errorMessage(error));
+        res.status(400).json({ error: errorMessage(error) });
+    }
+});
+app.put('/api/chats/:id', async (req, res) => {
+    try {
+        const messages = validateChatMessages(req.body?.messages);
+        const title = typeof req.body?.title === 'string' && req.body.title.trim()
+            ? req.body.title.replace(/\s+/g, ' ').trim()
+            : 'Untitled chat';
+        const model = typeof req.body?.model === 'string' ? req.body.model : undefined;
+        const chat = await upsertSavedChat({
+            id: req.params.id,
+            title,
+            model,
+            messages,
+        });
+        res.json({ chat });
+    }
+    catch (error) {
+        console.error('Saved chat update error:', errorMessage(error));
+        res.status(400).json({ error: errorMessage(error) });
+    }
+});
+app.patch('/api/chats/:id', async (req, res) => {
+    try {
+        await ensureDatabase();
+        const title = typeof req.body?.title === 'string' && req.body.title.trim()
+            ? req.body.title.replace(/\s+/g, ' ').trim()
+            : '';
+        if (!title) {
+            res.status(400).json({ error: 'A chat title is required.' });
+            return;
+        }
+        const result = await postgresPool.query(`
+        UPDATE saved_chats
+        SET title = $2, updated_at = now()
+        WHERE id = $1
+        RETURNING id, title, model, messages, created_at, updated_at;
+      `, [req.params.id, title]);
+        if (result.rowCount === 0) {
+            res.status(404).json({ error: 'Saved chat not found.' });
+            return;
+        }
+        res.json({ chat: toSavedChat(result.rows[0]) });
+    }
+    catch (error) {
+        console.error('Saved chat rename error:', errorMessage(error));
+        res.status(400).json({ error: errorMessage(error) });
+    }
+});
+app.delete('/api/chats/:id', async (req, res) => {
+    try {
+        await ensureDatabase();
+        const result = await postgresPool.query('DELETE FROM saved_chats WHERE id = $1 RETURNING id;', [req.params.id]);
+        if (result.rowCount === 0) {
+            res.status(404).json({ error: 'Saved chat not found.' });
+            return;
+        }
+        res.json({ deleted: req.params.id });
+    }
+    catch (error) {
+        console.error('Saved chat delete error:', errorMessage(error));
+        res.status(400).json({ error: errorMessage(error) });
+    }
+});
+app.get('/api/questions/top', async (req, res) => {
+    try {
+        await ensureDatabase();
+        const limit = Math.min(100, Math.max(1, Number(req.query.limit || 20)));
+        const result = await postgresPool.query(`
+        SELECT display_question, ask_count, first_asked_at, last_asked_at
+        FROM top_asked_questions
+        ORDER BY ask_count DESC, last_asked_at DESC
+        LIMIT $1;
+      `, [limit]);
+        res.json({
+            questions: result.rows.map(row => ({
+                question: row.display_question,
+                count: row.ask_count,
+                firstAskedAt: row.first_asked_at,
+                lastAskedAt: row.last_asked_at,
+            })),
+        });
+    }
+    catch (error) {
+        console.error('Top questions error:', errorMessage(error));
+        res.status(500).json({ error: `Failed to load top questions: ${errorMessage(error)}` });
+    }
+});
 app.get('/api/weaviate/health', async (req, res) => {
     try {
         const ready = await weaviateClient.misc.readyChecker().do();
@@ -967,75 +1671,6 @@ app.delete('/api/weaviate/collections/:className', async (req, res) => {
         res.status(400).json({ error: errorMessage(error) });
     }
 });
-
-app.get('/api/weaviate/collections', async (req, res) => {
-  try {
-    const schema = await weaviateClient.schema.getter().do();
-    const collections = (schema.classes || [])
-      .filter((cls) => Array.isArray(cls.properties) && cls.properties.some((property) => property.name === 'content'))
-      .map((cls) => ({
-        name: cls.class,
-        description: cls.description,
-        vectorizer: cls.vectorizer,
-      }))
-      .sort((left, right) => left.name.localeCompare(right.name));
-
-    res.json({
-      defaultCollection: DEFAULT_WEAVIATE_FILE_CLASS,
-      collections,
-    });
-  } catch (error) {
-    console.error('Weaviate collection list error:', error.message);
-    if (isConnectionRefused(error)) {
-      res.status(503).json({ error: weaviateUnavailableMessage() });
-      return;
-    }
-    res.status(500).json({ error: error.message });
-  }
-});
-
-app.post('/api/weaviate/collections', async (req, res) => {
-  try {
-    const className = normalizeWeaviateClassName(req.body?.className);
-    await ensureFileCollection(className);
-    res.json({
-      collection: {
-        name: className,
-        description: 'Files uploaded from the frontend',
-        vectorizer: 'text2vec-transformers',
-      },
-    });
-  } catch (error) {
-    console.error('Weaviate collection create error:', error.message);
-    if (isConnectionRefused(error)) {
-      res.status(503).json({ error: weaviateUnavailableMessage() });
-      return;
-    }
-    res.status(400).json({ error: error.message });
-  }
-});
-
-app.delete('/api/weaviate/collections/:className', async (req, res) => {
-  try {
-    const className = normalizeWeaviateClassName(req.params.className);
-    const exists = await weaviateClient.schema.exists(className);
-    if (!exists) {
-      res.status(404).json({ error: `Weaviate library "${className}" does not exist.` });
-      return;
-    }
-
-    await weaviateClient.schema.classDeleter().withClassName(className).do();
-    res.json({ deleted: className });
-  } catch (error) {
-    console.error('Weaviate collection delete error:', error.message);
-    if (isConnectionRefused(error)) {
-      res.status(503).json({ error: weaviateUnavailableMessage() });
-      return;
-    }
-    res.status(400).json({ error: error.message });
-  }
-});
-
 app.get('/api/weaviate/source/:className/:id', async (req, res) => {
     try {
         const className = normalizeWeaviateClassName(req.params.className);
@@ -1166,7 +1801,7 @@ app.delete('/api/weaviate/collections/:className/files/:id', async (req, res) =>
         res.status(400).json({ error: errorMessage(error) });
     }
 });
-app.post('/api/chat', async (req, res) => {
+app.post('/api/chat', trackAskedQuestionMiddleware, async (req, res) => {
     try {
         const { message, className, classNames, model, useWeaviateContext = true } = req.body;
         const generationOptions = normalizeGenerationOptions(req.body);
@@ -1193,6 +1828,14 @@ app.post('/api/chat', async (req, res) => {
                     className: item.className,
                     fileName: item.fileName,
                     filePath: item.filePath || item.fileName,
+                    sectionTitle: item.sectionTitle,
+                    sectionPath: item.sectionPath,
+                    chunkType: item.chunkType,
+                    language: item.language,
+                    startLine: item.startLine,
+                    endLine: item.endLine,
+                    chunkIndex: item.chunkIndex,
+                    chunkCount: item.chunkCount,
                     certainty: item.certainty,
                     score: item.score,
                     scoreLabel: item.scoreLabel,
@@ -1254,38 +1897,45 @@ app.post('/api/weaviate/upload', async (req, res) => {
                     await deleteFileChunksByPath(className, file.path);
                 }
                 else {
-                skippedDuplicates.push({
-                    id: existingFile._additional?.id,
-                    fileName: file.name,
-                    filePath: file.path,
-                    reason: 'already exists',
-                });
-                continue;
+                    skippedDuplicates.push({
+                        id: existingFile._additional?.id,
+                        fileName: file.name,
+                        filePath: file.path,
+                        reason: 'already exists',
+                    });
+                    continue;
                 }
             }
-            const chunks = splitContentIntoChunks(file.content);
+            const chunks = splitContentIntoChunks(file.content, file.path, file.type);
             const fileId = createFileId(file.path);
             let firstChunkId = '';
             try {
-            for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
-                const result = await createWeaviateChunkWithRetry(className, {
-                    content: chunks[chunkIndex],
-                    fileName: file.name,
-                    filePath: file.path,
-                    fileId,
-                    chunkIndex,
-                    chunkCount: chunks.length,
-                    mimeType: file.type,
-                    size: file.size,
-                    uploadedAt,
-                });
-                if (!firstChunkId && typeof result.id === 'string') {
-                    firstChunkId = result.id;
+                for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+                    const chunk = chunks[chunkIndex];
+                    const result = await createWeaviateChunkWithRetry(className, {
+                        content: chunk.content,
+                        fileName: file.name,
+                        filePath: file.path,
+                        fileId,
+                        chunkIndex,
+                        chunkCount: chunks.length,
+                        chunkType: chunk.chunkType,
+                        sectionTitle: chunk.sectionTitle,
+                        sectionPath: chunk.sectionPath,
+                        language: chunk.language,
+                        startLine: chunk.startLine,
+                        endLine: chunk.endLine,
+                        mimeType: file.type,
+                        size: file.size,
+                        uploadedAt,
+                    });
+                    if (!firstChunkId && typeof result.id === 'string') {
+                        firstChunkId = result.id;
+                    }
+                    if (WEAVIATE_UPLOAD_CHUNK_DELAY_MS > 0 && chunkIndex < chunks.length - 1) {
+                        await sleep(WEAVIATE_UPLOAD_CHUNK_DELAY_MS);
+                    }
                 }
-                if (WEAVIATE_UPLOAD_CHUNK_DELAY_MS > 0 && chunkIndex < chunks.length - 1) {
-                    await sleep(WEAVIATE_UPLOAD_CHUNK_DELAY_MS);
-                }
-            }
             }
             catch (error) {
                 const deletedCount = await deleteFileChunksByPath(className, file.path);
