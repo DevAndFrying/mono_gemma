@@ -2370,7 +2370,7 @@ app.post('/mcp/request', async (req, res) => {
           },
           {
             name: 'weaviate_search',
-            description: 'Search documents in a Weaviate collection using semantic search',
+            description: 'Search documents in a Weaviate collection using hybrid vector and keyword search',
             inputSchema: {
               type: 'object',
               properties: {
@@ -2453,8 +2453,8 @@ app.post('/mcp/request', async (req, res) => {
           const result = await weaviateClient.graphql
             .get()
             .withClassName(args.className)
-            .withFields('content _additional { id certainty }')
-            .withNearText({ concepts: [args.query] })
+            .withFields('content _additional { id score }')
+            .withHybrid({ query: args.query, alpha: WEAVIATE_HYBRID_ALPHA, properties: ['content'] })
             .withLimit(args.limit || 10)
             .do();
 
