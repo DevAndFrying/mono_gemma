@@ -30,6 +30,19 @@ fi
 COMPOSE_FILES=(-f docker-compose.yml)
 ACCELERATOR="${MCP_ACCELERATOR:-auto}"
 OLLAMA_MODE="${MCP_OLLAMA_MODE:-auto}"
+NODE_MAJOR="${NODE_MAJOR:-20}"
+
+install_node_npm() {
+    if ! command -v apt-get > /dev/null 2>&1; then
+        return 1
+    fi
+
+    echo "npm not found. Installing Node.js ${NODE_MAJOR}.x and npm..."
+    sudo apt-get update
+    sudo apt-get install -y ca-certificates curl gnupg
+    curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | sudo -E bash -
+    sudo apt-get install -y nodejs
+}
 
 detect_nvidia_gpu_runtime() {
     if ! command -v nvidia-smi > /dev/null 2>&1; then
@@ -100,8 +113,18 @@ fi
 echo ""
 echo "Building frontend assets for http://localhost:3000..."
 if ! command -v npm > /dev/null 2>&1; then
-    echo "npm not found. Install Node.js/npm or run Docker without the frontend bind mount."
-    exit 1
+    if ! install_node_npm || ! command -v npm > /dev/null 2>&1; then
+        echo "❌ npm not found. Install Node.js/npm or run Docker without the frontend bind mount."
+        exit 1
+    fi
+fi
+
+if [ ! -d node_modules ]; then
+    npm ci
+fi
+
+if [ ! -x frontend/node_modules/.bin/vite ]; then
+    npm --prefix frontend ci
 fi
 
 npm run build:frontend

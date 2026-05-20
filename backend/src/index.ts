@@ -1463,6 +1463,7 @@ const buildPromptWithWeaviateContext = async (
 
 type ActiveOllamaStream = {
   abortController: AbortController;
+  keepAliveTimer?: ReturnType<typeof setInterval>;
   responseStream?: {
     destroy?: (error?: Error) => void;
   };
@@ -1488,11 +1489,22 @@ const stopActiveStream = (ws: any, reason = 'Stopped by user') => {
   }
 
   activeStream.stopped = true;
+  if (activeStream.keepAliveTimer) {
+    clearInterval(activeStream.keepAliveTimer);
+    activeStream.keepAliveTimer = undefined;
+  }
   if (!activeStream.abortController.signal.aborted) {
     activeStream.abortController.abort();
   }
   activeStream.responseStream?.destroy?.(new Error(reason));
   ws.activeOllamaStream = undefined;
+};
+
+const clearStreamKeepAlive = (activeStream: ActiveOllamaStream) => {
+  if (activeStream.keepAliveTimer) {
+    clearInterval(activeStream.keepAliveTimer);
+    activeStream.keepAliveTimer = undefined;
+  }
 };
 
 // Store active WebSocket connections
@@ -1532,6 +1544,17 @@ wss.on('connection', (ws: any, req: any) => {
           stopped: false,
         };
         ws.activeOllamaStream = activeStream;
+        activeStream.keepAliveTimer = setInterval(() => {
+          if (activeStream.stopped || ws.readyState !== WS_OPEN) {
+            clearStreamKeepAlive(activeStream);
+            return;
+          }
+
+          safeWsSend(ws, JSON.stringify({
+            type: 'keepalive',
+            payload: { timestamp: Date.now() },
+          }));
+        }, 15000);
 
         try {
           const resolvedModel = await resolveOllamaModel(model);
@@ -1678,6 +1701,7 @@ wss.on('connection', (ws: any, req: any) => {
           });
 
           response.data.on('end', () => {
+            clearStreamKeepAlive(activeStream);
             if (activeStream.stopped || ws.readyState !== WS_OPEN) {
               if (ws.activeOllamaStream === activeStream) {
                 ws.activeOllamaStream = undefined;
@@ -1700,6 +1724,7 @@ wss.on('connection', (ws: any, req: any) => {
           });
 
           response.data.on('error', (error: Error) => {
+            clearStreamKeepAlive(activeStream);
             if (activeStream.stopped || activeStream.abortController.signal.aborted) {
               if (ws.activeOllamaStream === activeStream) {
                 ws.activeOllamaStream = undefined;
@@ -1713,6 +1738,7 @@ wss.on('connection', (ws: any, req: any) => {
             }));
           });
         } catch (streamError) {
+          clearStreamKeepAlive(activeStream);
           if (activeStream.stopped || activeStream.abortController.signal.aborted) {
             console.log('🛑 Ollama request aborted');
             return;
