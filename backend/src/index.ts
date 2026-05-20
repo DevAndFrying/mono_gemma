@@ -32,11 +32,12 @@ const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 
 const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 32000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
 const WEAVIATE_PQ_TRAINING_LIMIT = Number(process.env.WEAVIATE_PQ_TRAINING_LIMIT || 50000);
-const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 1800);
-const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 250);
-const WEAVIATE_UPLOAD_MIN_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_MIN_CHUNK_CHARS || 800);
-const WEAVIATE_UPLOAD_CHUNK_DELAY_MS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_DELAY_MS || 20);
-const WEAVIATE_UPLOAD_CHUNK_RETRIES = Number(process.env.WEAVIATE_UPLOAD_CHUNK_RETRIES || 3);
+const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 900);
+const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 120);
+const WEAVIATE_UPLOAD_MIN_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_MIN_CHUNK_CHARS || 400);
+const WEAVIATE_UPLOAD_CHUNK_DELAY_MS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_DELAY_MS || 200);
+const WEAVIATE_UPLOAD_CHUNK_RETRIES = Number(process.env.WEAVIATE_UPLOAD_CHUNK_RETRIES || 6);
+const WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST = Number(process.env.WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST || 8);
 const WEAVIATE_HYBRID_ALPHA = Number(process.env.WEAVIATE_HYBRID_ALPHA || 0.35);
 const WEAVIATE_RERANK_CANDIDATE_MULTIPLIER = Number(process.env.WEAVIATE_RERANK_CANDIDATE_MULTIPLIER || 2);
 const WEAVIATE_SEARCH_MAX_CANDIDATES = Number(process.env.WEAVIATE_SEARCH_MAX_CANDIDATES || 24);
@@ -44,7 +45,7 @@ const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLo
 const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
-const HTTP_RESPONSE_HEARTBEAT_MS = Number(process.env.HTTP_RESPONSE_HEARTBEAT_MS || 15000);
+const HTTP_RESPONSE_HEARTBEAT_MS = Number(process.env.HTTP_RESPONSE_HEARTBEAT_MS || 5000);
 const HTTP_REQUEST_TIMEOUT_MS = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
 const HTTP_HEADERS_TIMEOUT_MS = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || HTTP_REQUEST_TIMEOUT_MS + 5000);
 const HTTP_KEEP_ALIVE_TIMEOUT_MS = Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 65000);
@@ -2291,6 +2292,11 @@ app.post('/api/weaviate/upload', async (req, res) => {
   try {
     const className = normalizeWeaviateClassName(req.body?.className);
     const files = validateUploadedFiles(req.body?.files);
+    const requestedStartChunkIndex = Math.max(0, Math.floor(Number(req.body?.startChunkIndex || 0)));
+    const maxChunksPerRequest = Math.max(1, Math.floor(WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST));
+    if (requestedStartChunkIndex > 0 && files.length !== 1) {
+      throw new Error('Chunked Weaviate upload continuation must include exactly one file.');
+    }
     await ensureFileCollection(className);
 
     const uploadedAt = new Date().toISOString();
@@ -2298,29 +2304,39 @@ app.post('/api/weaviate/upload', async (req, res) => {
     const skippedDuplicates = [];
 
     for (const file of files) {
-      const existingFile = await findExistingFileByPath(className, file.path);
-      if (existingFile) {
+      const startChunkIndex = files.length === 1 ? requestedStartChunkIndex : 0;
+      if (startChunkIndex === 0) {
+        const existingFile = await findExistingFileByPath(className, file.path);
+        if (existingFile) {
+          const chunkIds = await findFileChunkIdsByPath(className, file.path);
+          const expectedChunkCount = typeof existingFile.chunkCount === 'number' ? existingFile.chunkCount : 1;
+          if (chunkIds.length < expectedChunkCount) {
+            await deleteFileChunksByPath(className, file.path);
+          } else {
+            skippedDuplicates.push({
+              id: existingFile._additional?.id,
+              fileName: file.name,
+              filePath: file.path,
+              reason: 'already exists',
+            });
+            continue;
+          }
+        }
+      } else {
         const chunkIds = await findFileChunkIdsByPath(className, file.path);
-        const expectedChunkCount = typeof existingFile.chunkCount === 'number' ? existingFile.chunkCount : 1;
-        if (chunkIds.length < expectedChunkCount) {
-          await deleteFileChunksByPath(className, file.path);
-        } else {
-          skippedDuplicates.push({
-            id: existingFile._additional?.id,
-            fileName: file.name,
-            filePath: file.path,
-            reason: 'already exists',
-          });
-          continue;
+        if (chunkIds.length < startChunkIndex) {
+          throw new Error(`Upload continuation for "${file.path}" is missing earlier chunks. Restart the upload.`);
         }
       }
 
       const chunks = splitContentIntoChunks(file.content, file.path, file.type);
+      const clampedStartChunkIndex = Math.min(startChunkIndex, chunks.length);
+      const endChunkIndex = Math.min(chunks.length, clampedStartChunkIndex + maxChunksPerRequest);
       const fileId = createFileId(file.path);
       let firstChunkId = '';
 
       try {
-        for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+        for (let chunkIndex = clampedStartChunkIndex; chunkIndex < endChunkIndex; chunkIndex += 1) {
           const chunk = chunks[chunkIndex];
           const result = await createWeaviateChunkWithRetry(className, {
             content: chunk.content,
@@ -2344,7 +2360,7 @@ app.post('/api/weaviate/upload', async (req, res) => {
             firstChunkId = result.id;
           }
 
-          if (WEAVIATE_UPLOAD_CHUNK_DELAY_MS > 0 && chunkIndex < chunks.length - 1) {
+          if (WEAVIATE_UPLOAD_CHUNK_DELAY_MS > 0 && chunkIndex < endChunkIndex - 1) {
             await sleep(WEAVIATE_UPLOAD_CHUNK_DELAY_MS);
           }
         }
@@ -2356,12 +2372,17 @@ app.post('/api/weaviate/upload', async (req, res) => {
         throw error;
       }
 
+      const complete = endChunkIndex >= chunks.length;
+      const completedFile = complete ? await findExistingFileByPath(className, file.path) : undefined;
       uploaded.push({
-        id: firstChunkId,
+        id: firstChunkId || completedFile?._additional?.id || '',
         fileName: file.name,
         filePath: file.path,
         size: file.size,
         chunkCount: chunks.length,
+        processedChunkCount: endChunkIndex - clampedStartChunkIndex,
+        nextChunkIndex: complete ? null : endChunkIndex,
+        complete,
       });
     }
 
