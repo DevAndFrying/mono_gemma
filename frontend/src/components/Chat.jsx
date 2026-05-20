@@ -8,8 +8,8 @@ import InputArea from './InputArea';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-const UPLOAD_BATCH_FILE_LIMIT = 25;
-const UPLOAD_BATCH_BYTE_LIMIT = 8 * 1024 * 1024;
+const UPLOAD_BATCH_FILE_LIMIT = 5;
+const UPLOAD_BATCH_BYTE_LIMIT = 2 * 1024 * 1024;
 const MAX_REPO_FILE_BYTES = 20 * 1024 * 1024;
 const PDF_FILE_EXTENSIONS = new Set(['.pdf']);
 const POWERPOINT_FILE_EXTENSIONS = new Set(['.pptx']);
@@ -1256,7 +1256,7 @@ function Chat({
         });
 
         const data = await readJsonResponse(response);
-        if (!response.ok) {
+        if (!response.ok || data.error) {
           throw new Error(data.error || 'Upload failed');
         }
         uploadedClassName = data.className || uploadedClassName;

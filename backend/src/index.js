@@ -41,6 +41,10 @@ const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLo
 const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
+const HTTP_RESPONSE_HEARTBEAT_MS = Number(process.env.HTTP_RESPONSE_HEARTBEAT_MS || 15000);
+const HTTP_REQUEST_TIMEOUT_MS = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
+const HTTP_HEADERS_TIMEOUT_MS = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || HTTP_REQUEST_TIMEOUT_MS + 5000);
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 65000);
 const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma4:26b,gemma4:e4b,gemma4:31b')
     .split(',')
     .map((model) => model.trim())
@@ -68,6 +72,40 @@ const weaviateClient = weaviate.client({
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '25mb' }));
+server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+server.timeout = HTTP_REQUEST_TIMEOUT_MS;
+const startJsonHeartbeat = (res) => {
+    let hasWritten = false;
+    const timer = setInterval(() => {
+        if (res.destroyed || res.writableEnded) {
+            clearInterval(timer);
+            return;
+        }
+        if (!hasWritten) {
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('X-Accel-Buffering', 'no');
+            res.flushHeaders?.();
+            hasWritten = true;
+        }
+        res.write('\n');
+    }, HTTP_RESPONSE_HEARTBEAT_MS);
+    return {
+        stop: () => clearInterval(timer),
+        writeJson: (statusCode, body) => {
+            clearInterval(timer);
+            if (!res.headersSent) {
+                res.status(statusCode);
+                res.setHeader('Content-Type', 'application/json; charset=utf-8');
+                res.setHeader('Cache-Control', 'no-store');
+                res.setHeader('X-Accel-Buffering', 'no');
+            }
+            res.end(JSON.stringify(body));
+        },
+    };
+};
 let ollamaModelCache = null;
 let databaseReadyPromise = null;
 const errorMessage = (error) => error instanceof Error ? error.message : String(error);
@@ -1904,6 +1942,7 @@ app.post('/api/pull-model', async (req, res) => {
     }
 });
 app.post('/api/weaviate/upload', async (req, res) => {
+    const heartbeat = startJsonHeartbeat(res);
     try {
         const className = normalizeWeaviateClassName(req.body?.className);
         const files = validateUploadedFiles(req.body?.files);
@@ -1975,7 +2014,7 @@ app.post('/api/weaviate/upload', async (req, res) => {
                 chunkCount: chunks.length,
             });
         }
-        res.json({
+        heartbeat.writeJson(200, {
             className,
             uploaded,
             count: uploaded.length,
@@ -1986,16 +2025,19 @@ app.post('/api/weaviate/upload', async (req, res) => {
     catch (error) {
         console.error('Weaviate upload error:', errorMessage(error));
         if (isConnectionRefused(error)) {
-            res.status(503).json({ error: weaviateUnavailableMessage() });
+            heartbeat.writeJson(res.headersSent ? 200 : 503, { error: weaviateUnavailableMessage() });
             return;
         }
         if (isTransientWeaviateVectorizerError(error)) {
-            res.status(502).json({
+            heartbeat.writeJson(res.headersSent ? 200 : 502, {
                 error: `Weaviate's transformer vectorizer reset the connection while embedding upload chunks. Retry the upload after the t2v-transformers container is healthy, or increase WEAVIATE_UPLOAD_CHUNK_DELAY_MS. Details: ${errorMessage(error)}`,
             });
             return;
         }
-        res.status(400).json({ error: errorMessage(error) });
+        heartbeat.writeJson(res.headersSent ? 200 : 400, { error: errorMessage(error) });
+    }
+    finally {
+        heartbeat.stop();
     }
 });
 // Serve static files from frontend
