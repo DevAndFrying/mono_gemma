@@ -1,6 +1,6 @@
 services:
   ollama:
-    gpus: all
+    runtime: nvidia
     environment:
       - NVIDIA_VISIBLE_DEVICES=all
       - NVIDIA_DRIVER_CAPABILITIES=compute,utility
@@ -14,7 +14,7 @@ services:
                 - gpu
 
   t2v-transformers:
-    gpus: all
+    runtime: nvidia
     environment:
       - ENABLE_CUDA=1
       - NVIDIA_VISIBLE_DEVICES=all
