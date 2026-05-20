@@ -296,13 +296,30 @@ const trackAskedQuestionMiddleware = (req: Request, res: Response, next: NextFun
   next();
 };
 const isTransientWeaviateVectorizerError = (error: unknown) => {
-  const message = errorMessage(error);
+  if (axios.isAxiosError(error)) {
+    const status = error.response?.status;
+    if (status && [408, 429, 502, 503, 504].includes(status)) {
+      return true;
+    }
+  }
+
+  const message = errorMessage(error).toLowerCase();
   return [
     'connection reset by peer',
-    'ECONNRESET',
+    'econnreset',
+    'econnaborted',
+    'etimedout',
     'read tcp',
     't2v-transformers',
     '/vectors',
+    'bad gateway',
+    'service unavailable',
+    'gateway timeout',
+    'gateway time-out',
+    'request failed with status code 504',
+    'context deadline exceeded',
+    'timeout awaiting response headers',
+    'upstream request timeout',
   ].some((fragment) => message.includes(fragment));
 };
 const axiosResponseDetail = (data: unknown, fallback: string) => {
@@ -2363,7 +2380,7 @@ app.post('/api/weaviate/upload', async (req, res) => {
     }
     if (isTransientWeaviateVectorizerError(error)) {
       heartbeat.writeJson(res.headersSent ? 200 : 502, {
-        error: `Weaviate's transformer vectorizer reset the connection while embedding upload chunks. Retry the upload after the t2v-transformers container is healthy, or increase WEAVIATE_UPLOAD_CHUNK_DELAY_MS. Details: ${errorMessage(error)}`,
+        error: `Weaviate timed out while embedding upload chunks. Retry after the t2v-transformers container is healthy, or reduce WEAVIATE_UPLOAD_CHUNK_CHARS / increase WEAVIATE_UPLOAD_CHUNK_DELAY_MS. Details: ${errorMessage(error)}`,
       });
       return;
     }

@@ -136,6 +136,12 @@ const readJsonResponse = async (response) => {
     return JSON.parse(text);
   } catch {
     const details = text.replace(/\s+/g, ' ').trim().slice(0, 180);
+    const htmlTitle = details.match(/<title>(.*?)<\/title>/i)?.[1]
+      || details.match(/<h1>(.*?)<\/h1>/i)?.[1];
+    if (htmlTitle || /^<!doctype html/i.test(details) || /^<html[\s>]/i.test(details)) {
+      const status = response.status ? `${response.status} ` : '';
+      throw new Error(`Server returned ${status}${htmlTitle || 'an HTML error page'} instead of JSON.`);
+    }
     throw new Error(details || `Server returned a non-JSON response with status ${response.status}.`);
   }
 };
