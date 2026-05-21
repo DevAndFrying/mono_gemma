@@ -46,6 +46,7 @@ const HTTP_RESPONSE_HEARTBEAT_MS = Number(process.env.HTTP_RESPONSE_HEARTBEAT_MS
 const HTTP_REQUEST_TIMEOUT_MS = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
 const HTTP_HEADERS_TIMEOUT_MS = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || HTTP_REQUEST_TIMEOUT_MS + 5000);
 const HTTP_KEEP_ALIVE_TIMEOUT_MS = Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 65000);
+const WS_HEARTBEAT_MS = Number(process.env.WS_HEARTBEAT_MS || 25000);
 const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma4:26b,gemma4:e4b,gemma4:31b')
     .split(',')
     .map((model) => model.trim())
@@ -1302,6 +1303,29 @@ const clearStreamKeepAlive = (activeStream) => {
         activeStream.keepAliveTimer = undefined;
     }
 };
+const startWebSocketHeartbeat = () => {
+    if (!Number.isFinite(WS_HEARTBEAT_MS) || WS_HEARTBEAT_MS <= 0) {
+        return;
+    }
+    const timer = setInterval(() => {
+        wss.clients.forEach((ws) => {
+            if (ws.isAlive === false) {
+                console.warn('WebSocket heartbeat missed; terminating stale client.');
+                stopActiveStream(ws, 'WebSocket heartbeat missed');
+                ws.terminate();
+                return;
+            }
+            ws.isAlive = false;
+            try {
+                ws.ping();
+            }
+            catch (error) {
+                console.warn('WebSocket heartbeat ping failed:', errorMessage(error));
+            }
+        });
+    }, WS_HEARTBEAT_MS);
+    wss.on('close', () => clearInterval(timer));
+};
 // Store active WebSocket connections
 const clients = new Set();
 // WebSocket server
@@ -1310,8 +1334,13 @@ wss.on('connection', (ws, req) => {
     console.log('   Client address:', req.socket.remoteAddress);
     console.log('   Total clients:', wss.clients.size);
     clients.add(ws);
+    ws.isAlive = true;
+    ws.on('pong', () => {
+        ws.isAlive = true;
+    });
     ws.on('message', async (message) => {
         try {
+            ws.isAlive = true;
             console.log('📨 WebSocket message received, length:', message.length);
             const data = JSON.parse(message);
             const { type, payload } = data;
@@ -1544,6 +1573,7 @@ wss.on('connection', (ws, req) => {
         console.error('WebSocket error:', error);
     });
 });
+startWebSocketHeartbeat();
 // REST API endpoints
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', model: MODEL_NAME });

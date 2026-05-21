@@ -271,6 +271,9 @@ function Chat({
   const autoSaveTimeoutRef = useRef(null);
   const skipNextAutoSaveRef = useRef(false);
   const reconnectAfterCloseRef = useRef(false);
+  const webSocketReconnectTimerRef = useRef(null);
+  const webSocketReconnectAttemptRef = useRef(0);
+  const allowWebSocketReconnectRef = useRef(true);
   const activeSavedChatIdRef = useRef('');
   const savedChatsRef = useRef([]);
   const shouldStickToBottomRef = useRef(true);
@@ -406,6 +409,18 @@ function Chat({
   };
 
   const connectWebSocket = () => {
+    if (
+      wsRef.current
+      && (wsRef.current.readyState === WebSocket.CONNECTING || wsRef.current.readyState === WebSocket.OPEN)
+    ) {
+      return;
+    }
+
+    if (webSocketReconnectTimerRef.current) {
+      window.clearTimeout(webSocketReconnectTimerRef.current);
+      webSocketReconnectTimerRef.current = null;
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = import.meta.env.VITE_WS_URL
       || (
@@ -423,6 +438,7 @@ function Chat({
       wsRef.current.onopen = () => {
         console.log('WebSocket connected (state: OPEN)');
         wsRef.current.isConnected = true;
+        webSocketReconnectAttemptRef.current = 0;
         setWsConnected(true);
       };
 
@@ -532,6 +548,11 @@ function Chat({
         if (reconnectAfterCloseRef.current) {
           reconnectAfterCloseRef.current = false;
           window.setTimeout(connectWebSocket, 250);
+        } else if (allowWebSocketReconnectRef.current) {
+          const reconnectAttempt = webSocketReconnectAttemptRef.current;
+          const reconnectDelay = Math.min(1000 * (2 ** reconnectAttempt), 10000);
+          webSocketReconnectAttemptRef.current += 1;
+          webSocketReconnectTimerRef.current = window.setTimeout(connectWebSocket, reconnectDelay);
         }
       };
     } catch (error) {
@@ -543,8 +564,12 @@ function Chat({
     connectWebSocket();
 
     return () => {
+      allowWebSocketReconnectRef.current = false;
       if (streamFlushTimeoutRef.current) {
         window.clearTimeout(streamFlushTimeoutRef.current);
+      }
+      if (webSocketReconnectTimerRef.current) {
+        window.clearTimeout(webSocketReconnectTimerRef.current);
       }
       if (wsRef.current) {
         console.log('Cleaning up WebSocket...');
