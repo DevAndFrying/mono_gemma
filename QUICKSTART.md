@@ -35,7 +35,7 @@ Recommended Docker start:
 ./docker-start.sh
 ```
 
-This builds `frontend/dist` before starting Docker, so `http://localhost:3000` serves the latest frontend changes.
+This builds `frontend/dist` before starting Docker, so `http://localhost` serves the latest frontend changes.
 
 Force GPU mode:
 
@@ -60,9 +60,15 @@ npm run dev
 
 Docker:
 
-- http://localhost:3000
+- http://localhost
 - Weaviate: http://localhost:8080
 - PostgreSQL with pgvector: localhost:5432
+
+Docker publishes the app container's internal port `3000` on host port `80`. If port `80` is already used on your host, start it with a different public port:
+
+```bash
+APP_HOST_PORT=3000 ./docker-start.sh
+```
 
 Local dev:
 
@@ -146,13 +152,13 @@ docker compose down
 Check backend:
 
 ```bash
-curl http://localhost:3000/api/health
+curl http://localhost/api/health
 ```
 
 Check models:
 
 ```bash
-curl http://localhost:3000/api/models
+curl http://localhost/api/models
 ```
 
 Check host Ollama:

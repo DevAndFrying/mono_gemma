@@ -42,14 +42,20 @@ Start the full Docker stack:
 ./docker-start.sh
 ```
 
-The startup script builds `frontend/dist` first, then bind-mounts it into the backend container. This keeps `http://localhost:3000` aligned with the current frontend source.
+The startup script builds `frontend/dist` first, then bind-mounts it into the backend container. This keeps `http://localhost` aligned with the current frontend source.
 
 Open:
 
-- App: http://localhost:3000
-- Backend API: http://localhost:3000/api
+- App: http://localhost
+- Backend API: http://localhost/api
 - Weaviate: http://localhost:8080
 - PostgreSQL: localhost:5432
+
+Docker publishes the backend container's internal port `3000` on host port `80` by default. To use another host port, set `APP_HOST_PORT`, for example:
+
+```bash
+APP_HOST_PORT=3000 ./docker-start.sh
+```
 
 For local development without Docker:
 
@@ -118,7 +124,7 @@ Recommended EC2 setup:
 - Instance type: `g6e.xlarge`
 - AMI: AWS Deep Learning AMI with NVIDIA drivers, or Ubuntu 22.04/24.04 with NVIDIA drivers installed
 - Storage: at least 100 GB EBS for Docker images, Ollama models, Weaviate data, and uploads
-- Security group: expose `3000` only to your IP; keep `8080`, `11434`, and `5432` private unless you explicitly need remote access
+- Security group: expose `80` only to your IP; keep `8080`, `11434`, and `5432` private unless you explicitly need remote access
 
 On a fresh Ubuntu GPU host with NVIDIA drivers already working, run:
 
@@ -407,19 +413,19 @@ curl -s http://localhost:8080/v1/graphql \
 Health:
 
 ```bash
-curl http://localhost:3000/api/health
+curl http://localhost/api/health
 ```
 
 List models:
 
 ```bash
-curl http://localhost:3000/api/models
+curl http://localhost/api/models
 ```
 
 One-shot chat:
 
 ```bash
-curl -X POST http://localhost:3000/api/chat \
+curl -X POST http://localhost/api/chat \
   -H 'Content-Type: application/json' \
   -d '{
     "message": "Summarize the uploaded repo",
@@ -432,7 +438,7 @@ curl -X POST http://localhost:3000/api/chat \
 Upload files:
 
 ```bash
-curl -X POST http://localhost:3000/api/weaviate/upload \
+curl -X POST http://localhost/api/weaviate/upload \
   -H 'Content-Type: application/json' \
   -d '{
     "className": "uploaded_files",
@@ -451,13 +457,13 @@ curl -X POST http://localhost:3000/api/weaviate/upload \
 Source lookup:
 
 ```bash
-curl http://localhost:3000/api/weaviate/source/uploaded_files/YOUR_OBJECT_ID
+curl http://localhost/api/weaviate/source/uploaded_files/YOUR_OBJECT_ID
 ```
 
 MCP request endpoint:
 
 ```bash
-curl -X POST http://localhost:3000/mcp/request \
+curl -X POST http://localhost/mcp/request \
   -H 'Content-Type: application/json' \
   -d '{ "method": "tools/list", "params": {} }'
 ```
@@ -554,7 +560,7 @@ Check Weaviate:
 
 ```bash
 curl http://localhost:8080/v1/schema
-curl http://localhost:3000/api/weaviate/health
+curl http://localhost/api/weaviate/health
 ```
 
 Check PostgreSQL and pgvector:

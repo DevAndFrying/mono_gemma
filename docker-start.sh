@@ -111,7 +111,7 @@ else
 fi
 
 echo ""
-echo "Building frontend assets for http://localhost:3000..."
+echo "Building frontend assets for http://localhost:${APP_HOST_PORT:-80}..."
 if ! command -v npm > /dev/null 2>&1; then
     if ! install_node_npm || ! command -v npm > /dev/null 2>&1; then
         echo "❌ npm not found. Install Node.js/npm or run Docker without the frontend bind mount."
@@ -140,8 +140,8 @@ echo ""
 echo "✅ Application started!"
 echo ""
 echo "📍 Access the application:"
-echo "   Frontend: http://localhost:3000"
-echo "   Backend API: http://localhost:3000/api"
+echo "   Frontend: http://localhost:${APP_HOST_PORT:-80}"
+echo "   Backend API: http://localhost:${APP_HOST_PORT:-80}/api"
 echo "   Weaviate: http://localhost:8080"
 echo "   PostgreSQL: localhost:5432"
 echo ""
