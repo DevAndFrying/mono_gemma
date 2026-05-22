@@ -8,8 +8,6 @@ import InputArea from './InputArea';
 
 pdfjsLib.GlobalWorkerOptions.workerSrc = pdfWorkerUrl;
 
-const UPLOAD_BATCH_FILE_LIMIT = 25;
-const UPLOAD_BATCH_BYTE_LIMIT = 8 * 1024 * 1024;
 const MAX_REPO_FILE_BYTES = 20 * 1024 * 1024;
 const PDF_FILE_EXTENSIONS = new Set(['.pdf']);
 const POWERPOINT_FILE_EXTENSIONS = new Set(['.pptx']);
@@ -136,6 +134,12 @@ const readJsonResponse = async (response) => {
     return JSON.parse(text);
   } catch {
     const details = text.replace(/\s+/g, ' ').trim().slice(0, 180);
+    const htmlTitle = details.match(/<title>(.*?)<\/title>/i)?.[1]
+      || details.match(/<h1>(.*?)<\/h1>/i)?.[1];
+    if (htmlTitle || /^<!doctype html/i.test(details) || /^<html[\s>]/i.test(details)) {
+      const status = response.status ? `${response.status} ` : '';
+      throw new Error(`Server returned ${status}${htmlTitle || 'an HTML error page'} instead of JSON.`);
+    }
     throw new Error(details || `Server returned a non-JSON response with status ${response.status}.`);
   }
 };
@@ -267,6 +271,9 @@ function Chat({
   const autoSaveTimeoutRef = useRef(null);
   const skipNextAutoSaveRef = useRef(false);
   const reconnectAfterCloseRef = useRef(false);
+  const webSocketReconnectTimerRef = useRef(null);
+  const webSocketReconnectAttemptRef = useRef(0);
+  const allowWebSocketReconnectRef = useRef(true);
   const activeSavedChatIdRef = useRef('');
   const savedChatsRef = useRef([]);
   const shouldStickToBottomRef = useRef(true);
@@ -402,6 +409,18 @@ function Chat({
   };
 
   const connectWebSocket = () => {
+    if (
+      wsRef.current
+      && (wsRef.current.readyState === WebSocket.CONNECTING || wsRef.current.readyState === WebSocket.OPEN)
+    ) {
+      return;
+    }
+
+    if (webSocketReconnectTimerRef.current) {
+      window.clearTimeout(webSocketReconnectTimerRef.current);
+      webSocketReconnectTimerRef.current = null;
+    }
+
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const wsUrl = import.meta.env.VITE_WS_URL
       || (
@@ -419,6 +438,7 @@ function Chat({
       wsRef.current.onopen = () => {
         console.log('WebSocket connected (state: OPEN)');
         wsRef.current.isConnected = true;
+        webSocketReconnectAttemptRef.current = 0;
         setWsConnected(true);
       };
 
@@ -528,6 +548,11 @@ function Chat({
         if (reconnectAfterCloseRef.current) {
           reconnectAfterCloseRef.current = false;
           window.setTimeout(connectWebSocket, 250);
+        } else if (allowWebSocketReconnectRef.current) {
+          const reconnectAttempt = webSocketReconnectAttemptRef.current;
+          const reconnectDelay = Math.min(1000 * (2 ** reconnectAttempt), 10000);
+          webSocketReconnectAttemptRef.current += 1;
+          webSocketReconnectTimerRef.current = window.setTimeout(connectWebSocket, reconnectDelay);
         }
       };
     } catch (error) {
@@ -539,8 +564,12 @@ function Chat({
     connectWebSocket();
 
     return () => {
+      allowWebSocketReconnectRef.current = false;
       if (streamFlushTimeoutRef.current) {
         window.clearTimeout(streamFlushTimeoutRef.current);
+      }
+      if (webSocketReconnectTimerRef.current) {
+        window.clearTimeout(webSocketReconnectTimerRef.current);
       }
       if (wsRef.current) {
         console.log('Cleaning up WebSocket...');
@@ -1180,35 +1209,6 @@ function Chat({
     return { prepared, skipped };
   };
 
-  const createUploadBatches = (files) => {
-    const batches = [];
-    let currentBatch = [];
-    let currentBytes = 0;
-
-    files.forEach((file) => {
-      const fileBytes = new TextEncoder().encode(file.content).length;
-      const shouldStartNewBatch = currentBatch.length > 0 && (
-        currentBatch.length >= UPLOAD_BATCH_FILE_LIMIT
-        || currentBytes + fileBytes > UPLOAD_BATCH_BYTE_LIMIT
-      );
-
-      if (shouldStartNewBatch) {
-        batches.push(currentBatch);
-        currentBatch = [];
-        currentBytes = 0;
-      }
-
-      currentBatch.push(file);
-      currentBytes += fileBytes;
-    });
-
-    if (currentBatch.length > 0) {
-      batches.push(currentBatch);
-    }
-
-    return batches;
-  };
-
   const handleUploadFiles = async (files, className, options = {}) => {
     if (!connected || uploading || weaviateInfo?.status !== 'ready') {
       replaceLastUploadStatus({
@@ -1234,34 +1234,55 @@ function Chat({
         throw new Error(`No supported files found. Skipped ${skipped.length} file${skipped.length === 1 ? '' : 's'}.`);
       }
 
-      const batches = createUploadBatches(prepared);
       const uploaded = [];
       const skippedDuplicates = [];
       let uploadedClassName = className || DEFAULT_WEAVIATE_COLLECTION;
 
-      for (let batchIndex = 0; batchIndex < batches.length; batchIndex += 1) {
-        const batch = batches[batchIndex];
-        replaceLastUploadStatus({
-          role: 'assistant',
-          content: `Uploading batch ${batchIndex + 1} of ${batches.length} to Weaviate (${uploaded.length}/${prepared.length} files done)...`,
-        });
+      for (let fileIndex = 0; fileIndex < prepared.length; fileIndex += 1) {
+        const file = prepared[fileIndex];
+        let nextChunkIndex = 0;
 
-        const response = await fetch('/api/weaviate/upload', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            className,
-            files: batch,
-          }),
-        });
+        while (nextChunkIndex !== null) {
+          const chunkText = nextChunkIndex > 0 ? `, continuing at chunk ${nextChunkIndex + 1}` : '';
+          replaceLastUploadStatus({
+            role: 'assistant',
+            content: `Uploading ${fileIndex + 1} of ${prepared.length} to Weaviate: ${file.path || file.name}${chunkText}...`,
+          });
 
-        const data = await readJsonResponse(response);
-        if (!response.ok) {
-          throw new Error(data.error || 'Upload failed');
+          const response = await fetch('/api/weaviate/upload', {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({
+              className,
+              files: [file],
+              startChunkIndex: nextChunkIndex,
+            }),
+          });
+
+          const data = await readJsonResponse(response);
+          if (!response.ok || data.error) {
+            throw new Error(data.error || 'Upload failed');
+          }
+          uploadedClassName = data.className || uploadedClassName;
+          skippedDuplicates.push(...(data.skippedDuplicates || []));
+
+          if (data.skippedDuplicateCount > 0) {
+            nextChunkIndex = null;
+            break;
+          }
+
+          const uploadedFile = data.uploaded?.[0];
+          if (!uploadedFile) {
+            throw new Error('Upload did not return file progress.');
+          }
+
+          if (uploadedFile.complete === false && typeof uploadedFile.nextChunkIndex === 'number') {
+            nextChunkIndex = uploadedFile.nextChunkIndex;
+          } else {
+            uploaded.push(uploadedFile);
+            nextChunkIndex = null;
+          }
         }
-        uploadedClassName = data.className || uploadedClassName;
-        uploaded.push(...data.uploaded);
-        skippedDuplicates.push(...(data.skippedDuplicates || []));
       }
 
       const uploadedNames = uploaded.slice(0, 8).map(file => file.filePath || file.fileName).join(', ');

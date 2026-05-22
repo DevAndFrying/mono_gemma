@@ -29,11 +29,12 @@ const WEAVIATE_CONTEXT_RESULTS = Number(process.env.WEAVIATE_CONTEXT_RESULTS || 
 const WEAVIATE_CONTEXT_CHARS = Number(process.env.WEAVIATE_CONTEXT_CHARS || 32000);
 const WEAVIATE_ENABLE_PQ = process.env.WEAVIATE_ENABLE_PQ === 'true';
 const WEAVIATE_PQ_TRAINING_LIMIT = Number(process.env.WEAVIATE_PQ_TRAINING_LIMIT || 50000);
-const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 1800);
-const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 250);
-const WEAVIATE_UPLOAD_MIN_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_MIN_CHUNK_CHARS || 800);
-const WEAVIATE_UPLOAD_CHUNK_DELAY_MS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_DELAY_MS || 20);
-const WEAVIATE_UPLOAD_CHUNK_RETRIES = Number(process.env.WEAVIATE_UPLOAD_CHUNK_RETRIES || 3);
+const WEAVIATE_UPLOAD_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_CHARS || 900);
+const WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS || 120);
+const WEAVIATE_UPLOAD_MIN_CHUNK_CHARS = Number(process.env.WEAVIATE_UPLOAD_MIN_CHUNK_CHARS || 400);
+const WEAVIATE_UPLOAD_CHUNK_DELAY_MS = Number(process.env.WEAVIATE_UPLOAD_CHUNK_DELAY_MS || 200);
+const WEAVIATE_UPLOAD_CHUNK_RETRIES = Number(process.env.WEAVIATE_UPLOAD_CHUNK_RETRIES || 6);
+const WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST = Number(process.env.WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST || 8);
 const WEAVIATE_HYBRID_ALPHA = Number(process.env.WEAVIATE_HYBRID_ALPHA || 0.35);
 const WEAVIATE_RERANK_CANDIDATE_MULTIPLIER = Number(process.env.WEAVIATE_RERANK_CANDIDATE_MULTIPLIER || 2);
 const WEAVIATE_SEARCH_MAX_CANDIDATES = Number(process.env.WEAVIATE_SEARCH_MAX_CANDIDATES || 24);
@@ -41,6 +42,11 @@ const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLo
 const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
+const HTTP_RESPONSE_HEARTBEAT_MS = Number(process.env.HTTP_RESPONSE_HEARTBEAT_MS || 5000);
+const HTTP_REQUEST_TIMEOUT_MS = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
+const HTTP_HEADERS_TIMEOUT_MS = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || HTTP_REQUEST_TIMEOUT_MS + 5000);
+const HTTP_KEEP_ALIVE_TIMEOUT_MS = Number(process.env.HTTP_KEEP_ALIVE_TIMEOUT_MS || 65000);
+const WS_HEARTBEAT_MS = Number(process.env.WS_HEARTBEAT_MS || 25000);
 const SUGGESTED_MODELS = (process.env.SUGGESTED_MODELS || 'gemma4:26b,gemma4:e4b,gemma4:31b')
     .split(',')
     .map((model) => model.trim())
@@ -68,6 +74,40 @@ const weaviateClient = weaviate.client({
 // Middleware
 app.use(cors());
 app.use(express.json({ limit: process.env.JSON_BODY_LIMIT || '25mb' }));
+server.requestTimeout = HTTP_REQUEST_TIMEOUT_MS;
+server.headersTimeout = HTTP_HEADERS_TIMEOUT_MS;
+server.keepAliveTimeout = HTTP_KEEP_ALIVE_TIMEOUT_MS;
+server.timeout = HTTP_REQUEST_TIMEOUT_MS;
+const startJsonHeartbeat = (res) => {
+    let hasWritten = false;
+    const timer = setInterval(() => {
+        if (res.destroyed || res.writableEnded) {
+            clearInterval(timer);
+            return;
+        }
+        if (!hasWritten) {
+            res.setHeader('Content-Type', 'application/json; charset=utf-8');
+            res.setHeader('Cache-Control', 'no-store');
+            res.setHeader('X-Accel-Buffering', 'no');
+            res.flushHeaders?.();
+            hasWritten = true;
+        }
+        res.write('\n');
+    }, HTTP_RESPONSE_HEARTBEAT_MS);
+    return {
+        stop: () => clearInterval(timer),
+        writeJson: (statusCode, body) => {
+            clearInterval(timer);
+            if (!res.headersSent) {
+                res.status(statusCode);
+                res.setHeader('Content-Type', 'application/json; charset=utf-8');
+                res.setHeader('Cache-Control', 'no-store');
+                res.setHeader('X-Accel-Buffering', 'no');
+            }
+            res.end(JSON.stringify(body));
+        },
+    };
+};
 let ollamaModelCache = null;
 let databaseReadyPromise = null;
 const errorMessage = (error) => error instanceof Error ? error.message : String(error);
@@ -176,13 +216,29 @@ const trackAskedQuestionMiddleware = (req, res, next) => {
     next();
 };
 const isTransientWeaviateVectorizerError = (error) => {
-    const message = errorMessage(error);
+    if (axios.isAxiosError(error)) {
+        const status = error.response?.status;
+        if (status && [408, 429, 502, 503, 504].includes(status)) {
+            return true;
+        }
+    }
+    const message = errorMessage(error).toLowerCase();
     return [
         'connection reset by peer',
-        'ECONNRESET',
+        'econnreset',
+        'econnaborted',
+        'etimedout',
         'read tcp',
         't2v-transformers',
         '/vectors',
+        'bad gateway',
+        'service unavailable',
+        'gateway timeout',
+        'gateway time-out',
+        'request failed with status code 504',
+        'context deadline exceeded',
+        'timeout awaiting response headers',
+        'upstream request timeout',
     ].some((fragment) => message.includes(fragment));
 };
 const axiosResponseDetail = (data, fallback) => {
@@ -1231,11 +1287,44 @@ const stopActiveStream = (ws, reason = 'Stopped by user') => {
         return;
     }
     activeStream.stopped = true;
+    if (activeStream.keepAliveTimer) {
+        clearInterval(activeStream.keepAliveTimer);
+        activeStream.keepAliveTimer = undefined;
+    }
     if (!activeStream.abortController.signal.aborted) {
         activeStream.abortController.abort();
     }
     activeStream.responseStream?.destroy?.(new Error(reason));
     ws.activeOllamaStream = undefined;
+};
+const clearStreamKeepAlive = (activeStream) => {
+    if (activeStream.keepAliveTimer) {
+        clearInterval(activeStream.keepAliveTimer);
+        activeStream.keepAliveTimer = undefined;
+    }
+};
+const startWebSocketHeartbeat = () => {
+    if (!Number.isFinite(WS_HEARTBEAT_MS) || WS_HEARTBEAT_MS <= 0) {
+        return;
+    }
+    const timer = setInterval(() => {
+        wss.clients.forEach((ws) => {
+            if (ws.isAlive === false) {
+                console.warn('WebSocket heartbeat missed; terminating stale client.');
+                stopActiveStream(ws, 'WebSocket heartbeat missed');
+                ws.terminate();
+                return;
+            }
+            ws.isAlive = false;
+            try {
+                ws.ping();
+            }
+            catch (error) {
+                console.warn('WebSocket heartbeat ping failed:', errorMessage(error));
+            }
+        });
+    }, WS_HEARTBEAT_MS);
+    wss.on('close', () => clearInterval(timer));
 };
 // Store active WebSocket connections
 const clients = new Set();
@@ -1245,8 +1334,13 @@ wss.on('connection', (ws, req) => {
     console.log('   Client address:', req.socket.remoteAddress);
     console.log('   Total clients:', wss.clients.size);
     clients.add(ws);
+    ws.isAlive = true;
+    ws.on('pong', () => {
+        ws.isAlive = true;
+    });
     ws.on('message', async (message) => {
         try {
+            ws.isAlive = true;
             console.log('📨 WebSocket message received, length:', message.length);
             const data = JSON.parse(message);
             const { type, payload } = data;
@@ -1269,6 +1363,16 @@ wss.on('connection', (ws, req) => {
                     stopped: false,
                 };
                 ws.activeOllamaStream = activeStream;
+                activeStream.keepAliveTimer = setInterval(() => {
+                    if (activeStream.stopped || ws.readyState !== WS_OPEN) {
+                        clearStreamKeepAlive(activeStream);
+                        return;
+                    }
+                    safeWsSend(ws, JSON.stringify({
+                        type: 'keepalive',
+                        payload: { timestamp: Date.now() },
+                    }));
+                }, 15000);
                 try {
                     const resolvedModel = await resolveOllamaModel(model);
                     if (activeStream.stopped || activeStream.abortController.signal.aborted || ws.readyState !== WS_OPEN) {
@@ -1396,6 +1500,7 @@ wss.on('connection', (ws, req) => {
                         lines.forEach(handleOllamaLine);
                     });
                     response.data.on('end', () => {
+                        clearStreamKeepAlive(activeStream);
                         if (activeStream.stopped || ws.readyState !== WS_OPEN) {
                             if (ws.activeOllamaStream === activeStream) {
                                 ws.activeOllamaStream = undefined;
@@ -1417,6 +1522,7 @@ wss.on('connection', (ws, req) => {
                         }
                     });
                     response.data.on('error', (error) => {
+                        clearStreamKeepAlive(activeStream);
                         if (activeStream.stopped || activeStream.abortController.signal.aborted) {
                             if (ws.activeOllamaStream === activeStream) {
                                 ws.activeOllamaStream = undefined;
@@ -1431,6 +1537,7 @@ wss.on('connection', (ws, req) => {
                     });
                 }
                 catch (streamError) {
+                    clearStreamKeepAlive(activeStream);
                     if (activeStream.stopped || activeStream.abortController.signal.aborted) {
                         console.log('🛑 Ollama request aborted');
                         return;
@@ -1466,6 +1573,7 @@ wss.on('connection', (ws, req) => {
         console.error('WebSocket error:', error);
     });
 });
+startWebSocketHeartbeat();
 // REST API endpoints
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok', model: MODEL_NAME });
@@ -1881,36 +1989,53 @@ app.post('/api/pull-model', async (req, res) => {
     }
 });
 app.post('/api/weaviate/upload', async (req, res) => {
+    const heartbeat = startJsonHeartbeat(res);
     try {
         const className = normalizeWeaviateClassName(req.body?.className);
         const files = validateUploadedFiles(req.body?.files);
+        const requestedStartChunkIndex = Math.max(0, Math.floor(Number(req.body?.startChunkIndex || 0)));
+        const maxChunksPerRequest = Math.max(1, Math.floor(WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST));
+        if (requestedStartChunkIndex > 0 && files.length !== 1) {
+            throw new Error('Chunked Weaviate upload continuation must include exactly one file.');
+        }
         await ensureFileCollection(className);
         const uploadedAt = new Date().toISOString();
         const uploaded = [];
         const skippedDuplicates = [];
         for (const file of files) {
-            const existingFile = await findExistingFileByPath(className, file.path);
-            if (existingFile) {
-                const chunkIds = await findFileChunkIdsByPath(className, file.path);
-                const expectedChunkCount = typeof existingFile.chunkCount === 'number' ? existingFile.chunkCount : 1;
-                if (chunkIds.length < expectedChunkCount) {
-                    await deleteFileChunksByPath(className, file.path);
+            const startChunkIndex = files.length === 1 ? requestedStartChunkIndex : 0;
+            if (startChunkIndex === 0) {
+                const existingFile = await findExistingFileByPath(className, file.path);
+                if (existingFile) {
+                    const chunkIds = await findFileChunkIdsByPath(className, file.path);
+                    const expectedChunkCount = typeof existingFile.chunkCount === 'number' ? existingFile.chunkCount : 1;
+                    if (chunkIds.length < expectedChunkCount) {
+                        await deleteFileChunksByPath(className, file.path);
+                    }
+                    else {
+                        skippedDuplicates.push({
+                            id: existingFile._additional?.id,
+                            fileName: file.name,
+                            filePath: file.path,
+                            reason: 'already exists',
+                        });
+                        continue;
+                    }
                 }
-                else {
-                    skippedDuplicates.push({
-                        id: existingFile._additional?.id,
-                        fileName: file.name,
-                        filePath: file.path,
-                        reason: 'already exists',
-                    });
-                    continue;
+            }
+            else {
+                const chunkIds = await findFileChunkIdsByPath(className, file.path);
+                if (chunkIds.length < startChunkIndex) {
+                    throw new Error(`Upload continuation for "${file.path}" is missing earlier chunks. Restart the upload.`);
                 }
             }
             const chunks = splitContentIntoChunks(file.content, file.path, file.type);
+            const clampedStartChunkIndex = Math.min(startChunkIndex, chunks.length);
+            const endChunkIndex = Math.min(chunks.length, clampedStartChunkIndex + maxChunksPerRequest);
             const fileId = createFileId(file.path);
             let firstChunkId = '';
             try {
-                for (let chunkIndex = 0; chunkIndex < chunks.length; chunkIndex += 1) {
+                for (let chunkIndex = clampedStartChunkIndex; chunkIndex < endChunkIndex; chunkIndex += 1) {
                     const chunk = chunks[chunkIndex];
                     const result = await createWeaviateChunkWithRetry(className, {
                         content: chunk.content,
@@ -1932,7 +2057,7 @@ app.post('/api/weaviate/upload', async (req, res) => {
                     if (!firstChunkId && typeof result.id === 'string') {
                         firstChunkId = result.id;
                     }
-                    if (WEAVIATE_UPLOAD_CHUNK_DELAY_MS > 0 && chunkIndex < chunks.length - 1) {
+                    if (WEAVIATE_UPLOAD_CHUNK_DELAY_MS > 0 && chunkIndex < endChunkIndex - 1) {
                         await sleep(WEAVIATE_UPLOAD_CHUNK_DELAY_MS);
                     }
                 }
@@ -1944,15 +2069,20 @@ app.post('/api/weaviate/upload', async (req, res) => {
                 }
                 throw error;
             }
+            const complete = endChunkIndex >= chunks.length;
+            const completedFile = complete ? await findExistingFileByPath(className, file.path) : undefined;
             uploaded.push({
-                id: firstChunkId,
+                id: firstChunkId || completedFile?._additional?.id || '',
                 fileName: file.name,
                 filePath: file.path,
                 size: file.size,
                 chunkCount: chunks.length,
+                processedChunkCount: endChunkIndex - clampedStartChunkIndex,
+                nextChunkIndex: complete ? null : endChunkIndex,
+                complete,
             });
         }
-        res.json({
+        heartbeat.writeJson(200, {
             className,
             uploaded,
             count: uploaded.length,
@@ -1963,16 +2093,19 @@ app.post('/api/weaviate/upload', async (req, res) => {
     catch (error) {
         console.error('Weaviate upload error:', errorMessage(error));
         if (isConnectionRefused(error)) {
-            res.status(503).json({ error: weaviateUnavailableMessage() });
+            heartbeat.writeJson(res.headersSent ? 200 : 503, { error: weaviateUnavailableMessage() });
             return;
         }
         if (isTransientWeaviateVectorizerError(error)) {
-            res.status(502).json({
-                error: `Weaviate's transformer vectorizer reset the connection while embedding upload chunks. Retry the upload after the t2v-transformers container is healthy, or increase WEAVIATE_UPLOAD_CHUNK_DELAY_MS. Details: ${errorMessage(error)}`,
+            heartbeat.writeJson(res.headersSent ? 200 : 502, {
+                error: `Weaviate timed out while embedding upload chunks. Retry after the t2v-transformers container is healthy, or reduce WEAVIATE_UPLOAD_CHUNK_CHARS / increase WEAVIATE_UPLOAD_CHUNK_DELAY_MS. Details: ${errorMessage(error)}`,
             });
             return;
         }
-        res.status(400).json({ error: errorMessage(error) });
+        heartbeat.writeJson(res.headersSent ? 200 : 400, { error: errorMessage(error) });
+    }
+    finally {
+        heartbeat.stop();
     }
 });
 // Serve static files from frontend
@@ -2043,7 +2176,7 @@ app.post('/mcp/request', async (req, res) => {
                     },
                     {
                         name: 'weaviate_search',
-                        description: 'Search documents in a Weaviate collection using semantic search',
+                        description: 'Search documents in a Weaviate collection using hybrid vector and keyword search',
                         inputSchema: {
                             type: 'object',
                             properties: {
@@ -2129,8 +2262,8 @@ app.post('/mcp/request', async (req, res) => {
                     const result = await weaviateClient.graphql
                         .get()
                         .withClassName(args.className)
-                        .withFields('content _additional { id certainty }')
-                        .withNearText({ concepts: [args.query] })
+                        .withFields('content _additional { id score }')
+                        .withHybrid({ query: args.query, alpha: WEAVIATE_HYBRID_ALPHA, properties: ['content'] })
                         .withLimit(args.limit || 10)
                         .do();
                     res.json({ result: result.data.Get[args.className] });

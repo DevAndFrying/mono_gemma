@@ -161,6 +161,16 @@ The GPU compose overlay gives GPU access to both Ollama and Weaviate's `t2v-tran
 MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
 ```
 
+### ALB WebSockets And mTLS
+
+When this app is served through an Application Load Balancer, keep `WS_HEARTBEAT_MS` below the ALB connection idle timeout. The default app value is 25 seconds, which is below the ALB default 60 second idle timeout:
+
+```env
+WS_HEARTBEAT_MS=25000
+```
+
+The backend sends WebSocket ping frames on that interval even when chat is idle. The frontend reconnects after unexpected WebSocket closes, which covers load balancer connection rotation and target restarts. For long-running requests, keep the ALB idle timeout above any heartbeat interval and make the backend HTTP timeout larger than the ALB idle timeout.
+
 ## Models
 
 The selected model only affects chat answers. File uploads to Weaviate use Weaviate's embedding sidecar, not the selected Ollama model.
@@ -212,14 +222,16 @@ WEAVIATE_RERANK_CANDIDATE_MULTIPLIER=2
 WEAVIATE_SEARCH_MAX_CANDIDATES=24
 WEAVIATE_SEARCH_MODE=hybrid
 WEAVIATE_SEARCH_SNIPPET_CHARS=1200
-WEAVIATE_UPLOAD_CHUNK_CHARS=1800
-WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=250
-WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=800
-WEAVIATE_UPLOAD_CHUNK_DELAY_MS=20
-WEAVIATE_UPLOAD_CHUNK_RETRIES=3
+WEAVIATE_UPLOAD_CHUNK_CHARS=900
+WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=120
+WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=400
+WEAVIATE_UPLOAD_CHUNK_DELAY_MS=200
+WEAVIATE_UPLOAD_CHUNK_RETRIES=6
+WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST=8
 MAX_UPLOAD_FILE_BYTES=20971520
 OLLAMA_MODEL_CACHE_MS=30000
 OLLAMA_KEEP_ALIVE=10m
+WS_HEARTBEAT_MS=25000
 SUGGESTED_MODELS=gemma4:26b,gemma4:e4b,gemma4:31b
 NODE_ENV=development
 ```
@@ -320,11 +332,12 @@ WEAVIATE_SEARCH_MODE=both
 Tune how uploaded files are split before indexing:
 
 ```env
-WEAVIATE_UPLOAD_CHUNK_CHARS=1800
-WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=250
-WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=800
-WEAVIATE_UPLOAD_CHUNK_DELAY_MS=20
-WEAVIATE_UPLOAD_CHUNK_RETRIES=3
+WEAVIATE_UPLOAD_CHUNK_CHARS=900
+WEAVIATE_UPLOAD_CHUNK_OVERLAP_CHARS=120
+WEAVIATE_UPLOAD_MIN_CHUNK_CHARS=400
+WEAVIATE_UPLOAD_CHUNK_DELAY_MS=200
+WEAVIATE_UPLOAD_CHUNK_RETRIES=6
+WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST=8
 ```
 
 Uploaded text is split on heading, paragraph, Markdown table, and code boundaries before falling back to character windows. Large Markdown tables are split by row with the table header repeated in each chunk. Chunks store section, language, type, and line-range metadata; matching chunks are expanded with adjacent chunks during retrieval.

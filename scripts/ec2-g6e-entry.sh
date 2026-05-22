@@ -2,7 +2,9 @@
 
 set -euo pipefail
 
-echo "Setting up Docker, Docker Compose, and NVIDIA driver for EC2 G6e..."
+NODE_MAJOR="${NODE_MAJOR:-20}"
+
+echo "Setting up Docker, Docker Compose, Node.js/npm, and NVIDIA driver for EC2 G6e..."
 
 sudo apt-get update
 sudo apt-get install -y \
@@ -12,6 +14,19 @@ sudo apt-get install -y \
   git \
   linux-headers-"$(uname -r)" \
   nvidia-driver-550-server
+
+if ! command -v node >/dev/null 2>&1 || [ "$(node -p 'Number(process.versions.node.split(".")[0])')" -lt "$NODE_MAJOR" ]; then
+  curl -fsSL "https://deb.nodesource.com/setup_${NODE_MAJOR}.x" | sudo -E bash -
+  sudo apt-get install -y nodejs
+fi
+
+if [ -f package-lock.json ]; then
+  npm ci
+fi
+
+if [ -f frontend/package-lock.json ] && [ ! -x frontend/node_modules/.bin/vite ]; then
+  npm --prefix frontend ci
+fi
 
 if ! command -v docker >/dev/null 2>&1; then
   curl -fsSL https://get.docker.com | sh
