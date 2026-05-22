@@ -171,6 +171,16 @@ MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
 
 Set the target group health check to HTTP port `traffic port` or `80`, path `/api/health`, and success code `200`. The health endpoint only checks that the backend HTTP server is accepting requests, so model and database startup do not hold the load balancer health check open.
 
+For EC2 Docker Compose targets, verify the same path on the instance before troubleshooting the load balancer:
+
+```bash
+docker compose ps
+curl -i http://127.0.0.1/api/health
+curl -i http://PRIVATE_EC2_IP/api/health
+```
+
+The backend container should show host port `0.0.0.0:80->80/tcp` and become healthy. If the loopback curl works but the private-IP curl fails on the instance, port `80` is not published or another host firewall rule is blocking it. If both curls work, check that the target group registered this instance on port `80` and read the target health reason code.
+
 When this app is served through an Application Load Balancer, keep `WS_HEARTBEAT_MS` below the ALB connection idle timeout. The default app value is 25 seconds, which is below the ALB default 60 second idle timeout:
 
 ```env

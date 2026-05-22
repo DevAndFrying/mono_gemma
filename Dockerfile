@@ -47,5 +47,8 @@ ENV API_PORT=80
 # Expose ports
 EXPOSE 80 3001
 
+HEALTHCHECK --interval=10s --timeout=5s --start-period=20s --retries=3 \
+    CMD curl -fsS http://127.0.0.1:80/api/health > /dev/null || exit 1
+
 # Start backend (frontend is served from backend)
 CMD ["npm", "start"]
