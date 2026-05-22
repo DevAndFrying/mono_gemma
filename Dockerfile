@@ -41,8 +41,11 @@ COPY --from=builder /app/backend/node_modules ./backend/node_modules
 COPY backend/.env.example ./backend/.env
 COPY package.json ./
 
+# Container hosting probes the app on port 80 unless a service-level port is set.
+ENV API_PORT=80
+
 # Expose ports
-EXPOSE 3000 3001
+EXPOSE 80 3001
 
 # Start backend (frontend is served from backend)
 CMD ["npm", "start"]

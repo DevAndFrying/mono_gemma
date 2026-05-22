@@ -13,7 +13,7 @@
     "build:frontend": "cd frontend && npm run build",
     "start": "cd backend && npm start",
     "docker:build": "docker build -t mcp-gemma-monolith .",
-    "docker:run": "docker run -p 3001:3001 -p 5173:5173 --gpus all mcp-gemma-monolith"
+    "docker:run": "docker run -p 80:80 -p 3001:3001 --gpus all mcp-gemma-monolith"
   },
   "devDependencies": {
     "concurrently": "^8.2.2"

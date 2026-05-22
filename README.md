@@ -51,7 +51,7 @@ Open:
 - Weaviate: http://localhost:8080
 - PostgreSQL: localhost:5432
 
-Docker publishes the backend container's internal port `3000` on host port `80` by default. To use another host port, set `APP_HOST_PORT`, for example:
+The production Docker container listens on port `80` and publishes it on host port `80` by default. To use another host port, set `APP_HOST_PORT`, for example:
 
 ```bash
 APP_HOST_PORT=3000 ./docker-start.sh
@@ -124,7 +124,7 @@ Recommended EC2 setup:
 - Instance type: `g6e.xlarge`
 - AMI: AWS Deep Learning AMI with NVIDIA drivers, or Ubuntu 22.04/24.04 with NVIDIA drivers installed
 - Storage: at least 100 GB EBS for Docker images, Ollama models, Weaviate data, and uploads
-- Security group: expose `80` only to your IP; keep `8080`, `11434`, and `5432` private unless you explicitly need remote access
+- Security group: expose `80` to your load balancer security group, or only to your IP when no load balancer sits in front of the instance; keep `8080`, `11434`, and `5432` private unless you explicitly need remote access
 
 On a fresh Ubuntu GPU host with NVIDIA drivers already working, run:
 
@@ -168,6 +168,8 @@ MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=host ./docker-start.sh
 ```
 
 ### ALB WebSockets And mTLS
+
+Set the target group health check to HTTP port `traffic port` or `80`, path `/api/health`, and success code `200`. The health endpoint only checks that the backend HTTP server is accepting requests, so model and database startup do not hold the load balancer health check open.
 
 When this app is served through an Application Load Balancer, keep `WS_HEARTBEAT_MS` below the ALB connection idle timeout. The default app value is 25 seconds, which is below the ALB default 60 second idle timeout:
 

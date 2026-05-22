@@ -79,12 +79,12 @@ services:
       dockerfile: Dockerfile
     container_name: mcp-backend
     ports:
-      - "${APP_HOST_PORT:-80}:3000"
+      - "${APP_HOST_PORT:-80}:80"
       - "3001:3001"
     environment:
       - OLLAMA_BASE_URL=http://ollama:11434
       - MODEL_NAME=gemma4:26b
-      - API_PORT=3000
+      - API_PORT=80
       - MCP_PORT=3001
       - WEAVIATE_URL=http://weaviate:8080
       - DATABASE_URL=postgresql://mcp:mcp_dev_password@postgres:5432/mcp_gemma

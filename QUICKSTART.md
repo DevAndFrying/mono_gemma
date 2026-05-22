@@ -64,7 +64,7 @@ Docker:
 - Weaviate: http://localhost:8080
 - PostgreSQL with pgvector: localhost:5432
 
-Docker publishes the app container's internal port `3000` on host port `80`. If port `80` is already used on your host, start it with a different public port:
+The production Docker container listens on port `80` and publishes it on host port `80`. If port `80` is already used on your host, start it with a different public port:
 
 ```bash
 APP_HOST_PORT=3000 ./docker-start.sh
