@@ -113,6 +113,8 @@ services:
       - HTTP_KEEP_ALIVE_TIMEOUT_MS=65000
       - WS_HEARTBEAT_MS=25000
       - OLLAMA_KEEP_ALIVE=10m
+      - OLLAMA_PRELOAD_MODEL=true
+      - OLLAMA_PRELOAD_KEEP_ALIVE=10m
       - SUGGESTED_MODELS=gemma4:26b,gemma4:e4b,gemma4:31b
       - NODE_ENV=production
     depends_on:
