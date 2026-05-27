@@ -155,6 +155,16 @@ docker exec -it mcp-ollama ollama pull gemma4:26b
 docker exec -it mcp-ollama ollama ps
 ```
 
+`nvidia-smi` only shows Ollama using VRAM after a model is actually loaded. Pulling a model downloads it to disk; it does not load it into GPU memory. The Docker stack preloads `MODEL_NAME` on backend startup when the model is installed, and you can check the loaded state with:
+
+```bash
+curl http://localhost:3000/api/ollama/ps
+docker exec -it mcp-ollama ollama ps
+./scripts/check-gpu-ollama.sh gemma4:26b
+```
+
+In `ollama ps`, the `PROCESSOR` column is the strongest signal: `100% GPU` means the model is fully in VRAM, `100% CPU` means it is not using the GPU, and mixed CPU/GPU means the model only partially fit in VRAM.
+
 The GPU compose overlay gives GPU access to both Ollama and Weaviate's `t2v-transformers` embedding sidecar. If you use host Ollama instead of container Ollama, keep `MCP_ACCELERATOR=gpu` so Weaviate embeddings still use CUDA:
 
 ```bash
@@ -231,6 +241,8 @@ WEAVIATE_UPLOAD_MAX_CHUNKS_PER_REQUEST=8
 MAX_UPLOAD_FILE_BYTES=20971520
 OLLAMA_MODEL_CACHE_MS=30000
 OLLAMA_KEEP_ALIVE=10m
+OLLAMA_PRELOAD_MODEL=true
+OLLAMA_PRELOAD_KEEP_ALIVE=10m
 WS_HEARTBEAT_MS=25000
 SUGGESTED_MODELS=gemma4:26b,gemma4:e4b,gemma4:31b
 NODE_ENV=development

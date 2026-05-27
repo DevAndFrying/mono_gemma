@@ -153,6 +153,7 @@ Check models:
 
 ```bash
 curl http://localhost:3000/api/models
+curl http://localhost:3000/api/ollama/ps
 ```
 
 Check host Ollama:
@@ -165,6 +166,14 @@ Check Weaviate:
 
 ```bash
 curl http://localhost:8080/v1/schema
+```
+
+Check GPU/Ollama loading on a GPU host:
+
+```bash
+MCP_ACCELERATOR=gpu MCP_OLLAMA_MODE=container ./docker-start.sh
+docker exec -it mcp-ollama ollama pull gemma4:26b
+./scripts/check-gpu-ollama.sh gemma4:26b
 ```
 
 Check PostgreSQL and pgvector:

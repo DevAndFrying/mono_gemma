@@ -45,6 +45,9 @@ const WEAVIATE_SEARCH_MODE = (process.env.WEAVIATE_SEARCH_MODE || 'hybrid').toLo
 const WEAVIATE_SEARCH_SNIPPET_CHARS = Number(process.env.WEAVIATE_SEARCH_SNIPPET_CHARS || 1200);
 const OLLAMA_MODEL_CACHE_MS = Number(process.env.OLLAMA_MODEL_CACHE_MS || 30000);
 const OLLAMA_KEEP_ALIVE = process.env.OLLAMA_KEEP_ALIVE || '10m';
+const OLLAMA_PRELOAD_MODEL = process.env.OLLAMA_PRELOAD_MODEL === 'true';
+const OLLAMA_PRELOAD_KEEP_ALIVE = process.env.OLLAMA_PRELOAD_KEEP_ALIVE || OLLAMA_KEEP_ALIVE;
+const OLLAMA_PRELOAD_TIMEOUT_MS = Number(process.env.OLLAMA_PRELOAD_TIMEOUT_MS || 5 * 60 * 1000);
 const HTTP_RESPONSE_HEARTBEAT_MS = Number(process.env.HTTP_RESPONSE_HEARTBEAT_MS || 5000);
 const HTTP_REQUEST_TIMEOUT_MS = Number(process.env.HTTP_REQUEST_TIMEOUT_MS || 15 * 60 * 1000);
 const HTTP_HEADERS_TIMEOUT_MS = Number(process.env.HTTP_HEADERS_TIMEOUT_MS || HTTP_REQUEST_TIMEOUT_MS + 5000);
@@ -171,6 +174,15 @@ type UploadChunk = {
 
 type OllamaModel = {
   name: string;
+};
+
+type OllamaRunningModel = {
+  name?: string;
+  model?: string;
+  size?: number;
+  size_vram?: number;
+  expires_at?: string;
+  details?: Record<string, unknown>;
 };
 
 let ollamaModelCache: { models: string[]; expiresAt: number } | null = null;
@@ -386,6 +398,12 @@ const getInstalledOllamaModels = async (): Promise<string[]> => {
   return models;
 };
 
+const getLoadedOllamaModels = async (): Promise<OllamaRunningModel[]> => {
+  const response = await axios.get(`${OLLAMA_BASE_URL}/api/ps`);
+  return (response.data?.models || [])
+    .filter((model: unknown): model is OllamaRunningModel => !!model && typeof model === 'object');
+};
+
 const resolveOllamaModel = async (requestedModel?: string) => {
   const requested = requestedModel?.trim();
   const installedModels = await getInstalledOllamaModels();
@@ -423,6 +441,66 @@ const resolveOllamaModel = async (requestedModel?: string) => {
     requestedModel: requested,
     installedModels,
   };
+};
+
+const formatBytes = (bytes?: number) => {
+  if (typeof bytes !== 'number' || !Number.isFinite(bytes) || bytes <= 0) {
+    return 'unknown';
+  }
+
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  let value = bytes;
+  let unitIndex = 0;
+  while (value >= 1024 && unitIndex < units.length - 1) {
+    value /= 1024;
+    unitIndex += 1;
+  }
+
+  return `${value.toFixed(value >= 10 || unitIndex === 0 ? 0 : 1)} ${units[unitIndex]}`;
+};
+
+const preloadOllamaModel = async () => {
+  if (!OLLAMA_PRELOAD_MODEL) {
+    return;
+  }
+
+  try {
+    const resolvedModel = await resolveOllamaModel();
+    if (!resolvedModel.installedModels.includes(resolvedModel.model)) {
+      console.warn(`⚠️  Ollama preload skipped: model "${resolvedModel.model}" is not installed. Pull it first.`);
+      return;
+    }
+
+    console.log(`⏳ Preloading Ollama model "${resolvedModel.model}" with keep_alive=${OLLAMA_PRELOAD_KEEP_ALIVE}...`);
+    const response = await axios.post(
+      `${OLLAMA_BASE_URL}/api/generate`,
+      {
+        model: resolvedModel.model,
+        stream: false,
+        keep_alive: OLLAMA_PRELOAD_KEEP_ALIVE,
+      },
+      { timeout: OLLAMA_PRELOAD_TIMEOUT_MS }
+    );
+
+    const loadedModels = await getLoadedOllamaModels().catch(() => []);
+    const loadedModel = loadedModels.find((model) => (
+      model.name === resolvedModel.model || model.model === resolvedModel.model
+    ));
+    const loadDurationMs = typeof response.data?.load_duration === 'number'
+      ? Math.round(response.data.load_duration / 1_000_000)
+      : undefined;
+
+    console.log(
+      `✅ Ollama model preloaded: ${resolvedModel.model}` +
+      `${loadDurationMs ? ` in ${loadDurationMs}ms` : ''}` +
+      `${loadedModel ? `, reported VRAM=${formatBytes(loadedModel.size_vram)}` : ''}`
+    );
+    if (!loadedModel) {
+      console.warn('⚠️  Ollama preload completed, but /api/ps did not report a loaded model. Check Ollama logs.');
+    }
+  } catch (error) {
+    console.warn(`⚠️  Ollama preload failed: ${ollamaErrorMessage(error)}`);
+  }
 };
 
 const weaviateUnavailableMessage = () => (
@@ -1991,7 +2069,7 @@ app.get('/api/questions/top', async (req, res) => {
       [limit]
     );
     res.json({
-      questions: result.rows.map(row => ({
+      questions: result.rows.map((row: any) => ({
         question: row.display_question,
         count: row.ask_count,
         firstAskedAt: row.first_asked_at,
@@ -2292,13 +2370,31 @@ app.post('/api/chat', trackAskedQuestionMiddleware, async (req, res) => {
 app.get('/api/models', async (req, res) => {
   try {
     const models = await getInstalledOllamaModels();
+    const loadedModels = await getLoadedOllamaModels().catch(() => []);
     res.json({
       defaultModel: MODEL_NAME,
       suggestedModels: SUGGESTED_MODELS,
       models,
+      loadedModels,
     });
   } catch (error) {
     console.error('Error:', errorMessage(error));
+    res.status(500).json({ error: errorMessage(error) });
+  }
+});
+
+app.get('/api/ollama/ps', async (req, res) => {
+  try {
+    const loadedModels = await getLoadedOllamaModels();
+    res.json({
+      ollamaBaseUrl: OLLAMA_BASE_URL,
+      defaultModel: MODEL_NAME,
+      keepAlive: OLLAMA_KEEP_ALIVE,
+      preloadModel: OLLAMA_PRELOAD_MODEL,
+      models: loadedModels,
+    });
+  } catch (error) {
+    console.error('Ollama loaded-model status error:', errorMessage(error));
     res.status(500).json({ error: errorMessage(error) });
   }
 });
@@ -2675,4 +2771,5 @@ server.listen(API_PORT, () => {
   console.log(`🤖 Connected to Ollama at ${OLLAMA_BASE_URL}`);
   console.log(`📦 Using model: ${MODEL_NAME}`);
   console.log(`🗄️  Weaviate configured at ${WEAVIATE_URL}`);
+  preloadOllamaModel();
 });
